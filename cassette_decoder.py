@@ -278,6 +278,33 @@ def _lf(parent, label, pad=4):
     return ttk.LabelFrame(parent, text=label, padding=pad)
 
 
+class Tooltip:
+    """Hover tooltip: a small yellow popup shown while the pointer is over a widget."""
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text   = text
+        self._tip   = None
+        widget.bind('<Enter>', self._show, add='+')
+        widget.bind('<Leave>', self._hide, add='+')
+
+    def _show(self, _=None):
+        if self._tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 18
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self._tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f'+{x}+{y}')
+        tk.Label(tw, text=self.text, justify='left', background='#ffffe0',
+                 relief='solid', borderwidth=1, wraplength=340,
+                 font=('TkDefaultFont', 8)).pack(ipadx=4, ipady=2)
+
+    def _hide(self, _=None):
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL LEVEL METER WIDGET
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -472,13 +499,19 @@ class DecoderGUI:
     def _build_demod_tab(self, f):
         f.columnconfigure(1, weight=1)
 
-        ttk.Label(f, text='Method:').grid(row=0, column=0, sticky='w')
+        ml = ttk.Label(f, text='Method:')
+        ml.grid(row=0, column=0, sticky='w')
+        Tooltip(ml, 'Every setting on this tab MUST match the encoder exactly, or the stream '
+                    'will not decode. Easiest path: Load settings from the .json the encoder '
+                    'saved.')
         self._method_var = tk.StringVar(value='ofdm')
         mf = ttk.Frame(f)
         mf.grid(row=0, column=1, sticky='w')
         for m in self.METHODS:
-            ttk.Radiobutton(mf, text=m.upper(), variable=self._method_var,
-                            value=m, command=self._update_bitrate).pack(side='left', padx=4)
+            rb = ttk.Radiobutton(mf, text=m.upper(), variable=self._method_var,
+                            value=m, command=self._update_bitrate)
+            rb.pack(side='left', padx=4)
+            Tooltip(rb, 'Must match the encoder\'s modulation method.')
 
         self._fsk_baud    = self._se(f, 'FSK baud',     1, 1000, 10000, 6000, 100, 'baud')
         self._fsk_f0      = self._se(f, 'FSK f0',       2,  300,  4000, 1200, 100, 'Hz')
@@ -515,32 +548,45 @@ class DecoderGUI:
         self._cp_var    = tk.BooleanVar(value=False)
         self._pe_var    = tk.BooleanVar(value=False)
         self._rs_var    = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f, text='Constant-power carrier strip',
-                        variable=self._cp_var).grid(
-            row=0, column=0, columnspan=2, sticky='w')
-        self._cp_hz     = self._se(f, 'CP carrier Hz',  1, 50,  800, 300, 10, 'Hz')
-        ttk.Checkbutton(f, text='De-emphasis', variable=self._pe_var).grid(
-            row=2, column=0, columnspan=2, sticky='w')
-        self._pe_alpha  = self._se(f, 'Alpha',           3, 0.5, 0.99, 0.85, 0.01, '')
+        cp_cb = ttk.Checkbutton(f, text='Constant-power carrier strip',
+                        variable=self._cp_var)
+        cp_cb.grid(row=0, column=0, columnspan=2, sticky='w')
+        Tooltip(cp_cb, 'MUST match the encoder. Removes the AGC-pinning tone before '
+                       'demodulating. Turn on only if the encoder used it.')
+        self._cp_hz     = self._se(f, 'CP carrier Hz',  1, 50,  800, 300, 10, 'Hz',
+            tip='Carrier frequency to strip — must equal the encoder\'s setting.')
+        pe_cb = ttk.Checkbutton(f, text='De-emphasis', variable=self._pe_var)
+        pe_cb.grid(row=2, column=0, columnspan=2, sticky='w')
+        Tooltip(pe_cb, 'MUST match the encoder\'s pre-emphasis setting, or the audio will '
+                       'be filtered wrong and decode to garbage.')
+        self._pe_alpha  = self._se(f, 'Alpha',           3, 0.5, 0.99, 0.85, 0.01, '',
+            tip='De-emphasis strength — must equal the encoder\'s alpha.')
         ttk.Checkbutton(f, text='Reed-Solomon' + ('' if HAS_RS else ' [not installed]'),
                         variable=self._rs_var,
                         state='normal' if HAS_RS else 'disabled').grid(
             row=4, column=0, columnspan=2, sticky='w')
         self._rs_nsym   = self._se(f, 'RS parity syms', 5,  4,  64,  16,  2, 'bytes')
         self._blk_size  = self._se(f, 'Block payload',  6, 32, 1024, 256, 32, 'bytes')
-        self._paus_thr  = self._se(f, 'Pause threshold',7, 0.001, 0.1, 0.008, 0.001, 'RMS')
-        self._paus_time = self._se(f, 'Pause timeout',  8, 0.05, 2.0, 0.30, 0.05, 's')
+        self._paus_thr  = self._se(f, 'Pause threshold',7, 0.001, 0.1, 0.008, 0.001, 'RMS',
+            tip='Signal level below which the tape counts as stopped. If pausing the tape '
+                'doesn\'t freeze playback, raise this; if it falsely pauses, lower it.')
+        self._paus_time = self._se(f, 'Pause timeout',  8, 0.05, 2.0, 0.30, 0.05, 's',
+            tip='How long the signal must stay low before showing PAUSED. Higher = less '
+                'jumpy on brief dropouts.')
 
     def _build_video_tab(self, f):
         f.columnconfigure(1, weight=1)
         self._out_w = self._se(f, 'Display width',  0,  64, 1280, 256,  16, 'px')
         self._out_h = self._se(f, 'Display height', 1,  32,  720, 144,   8, 'px')
 
-    def _se(self, parent, label, row, lo, hi, default, res, suffix) -> SliderEntry:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=2, pady=1)
+    def _se(self, parent, label, row, lo, hi, default, res, suffix, tip='') -> SliderEntry:
+        lbl = ttk.Label(parent, text=label)
+        lbl.grid(row=row, column=0, sticky='w', padx=2, pady=1)
         w = SliderEntry(parent, from_=lo, to=hi, default=default,
                         resolution=res, suffix=suffix, command=self._update_bitrate)
         w.grid(row=row, column=1, sticky='ew', padx=2, pady=1)
+        if tip:
+            Tooltip(lbl, tip); Tooltip(w, tip)
         return w
 
     # ── Status bar ────────────────────────────────────────────────────────────

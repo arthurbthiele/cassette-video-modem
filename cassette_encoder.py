@@ -148,6 +148,33 @@ def _lf(parent, label: str, pad=6) -> ttk.LabelFrame:
     return f
 
 
+class Tooltip:
+    """Hover tooltip: a small yellow popup shown while the pointer is over a widget."""
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text   = text
+        self._tip   = None
+        widget.bind('<Enter>', self._show, add='+')
+        widget.bind('<Leave>', self._hide, add='+')
+
+    def _show(self, _=None):
+        if self._tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 18
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self._tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f'+{x}+{y}')
+        tk.Label(tw, text=self.text, justify='left', background='#ffffe0',
+                 relief='solid', borderwidth=1, wraplength=340,
+                 font=('TkDefaultFont', 8)).pack(ipadx=4, ipady=2)
+
+    def _hide(self, _=None):
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
+
 def _row(parent, label: str, row: int, widget_factory, col_span=1):
     ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=4, pady=2)
     w = widget_factory(parent)
@@ -327,9 +354,21 @@ class EncoderGUI:
         mf = _lf(f, 'Modulation method')
         mf.grid(row=row, column=0, sticky='ew', pady=4); row += 1
         self._method_var = tk.StringVar(value='ofdm')
+        method_tips = {
+            'ofdm': 'Highest bitrate (~7600 bps). Splits the band into many slow '
+                    'subcarriers — robust to tape dropouts. Best for good tape; '
+                    'the constant-power carrier is not yet reliable with OFDM.',
+            'dpsk': 'Differential phase keying. Good bitrate, tolerant of the '
+                    'pitch wobble (wow/flutter) of cheap decks.',
+            'fsk4': 'Four-tone FSK, 2 bits/symbol. A middle ground.',
+            'fsk':  'Two-tone FSK — the simplest and most robust, lowest bitrate. '
+                    'Try this first if a tape decodes poorly.',
+        }
         for m in self.METHODS:
-            ttk.Radiobutton(mf, text=m.upper(), variable=self._method_var,
-                            value=m, command=self._method_changed).pack(side='left', padx=8)
+            rb = ttk.Radiobutton(mf, text=m.upper(), variable=self._method_var,
+                                 value=m, command=self._method_changed)
+            rb.pack(side='left', padx=8)
+            Tooltip(rb, method_tips.get(m, ''))
 
         # FSK
         self._fsk_frame = _lf(f, 'FSK settings')
@@ -367,11 +406,21 @@ class EncoderGUI:
         self._ofdm_frame = _lf(f, 'OFDM settings')
         self._ofdm_frame.grid(row=row, column=0, sticky='ew', pady=2); row += 1
         self._ofdm_frame.columnconfigure(1, weight=1)
-        self._ofdm_fft  = self._slider_row(self._ofdm_frame, 'FFT size',        0, 128, 2048, 512,  128, 'samples')
-        self._ofdm_cp   = self._slider_row(self._ofdm_frame, 'Cyclic prefix',   1,  16,  512,  64,   16, 'samples')
-        self._ofdm_fmin = self._slider_row(self._ofdm_frame, 'Min freq (Hz)',   2, 200, 2000, 500,   50, 'Hz')
-        self._ofdm_fmax = self._slider_row(self._ofdm_frame, 'Max freq (Hz)',   3,2000, 8000,6000,  100, 'Hz')
-        self._ofdm_pilot= self._slider_row(self._ofdm_frame, 'Pilot interval',  4,   2,   20,   8,    1, 'carriers')
+        self._ofdm_fft  = self._slider_row(self._ofdm_frame, 'FFT size',        0, 128, 2048, 512,  128, 'samples',
+            tip='Number of subcarriers (FFT bins). Bigger = more carriers and finer '
+                'frequency spacing, but each symbol is longer and more sensitive to wobble.')
+        self._ofdm_cp   = self._slider_row(self._ofdm_frame, 'Cyclic prefix',   1,  16,  512,  64,   16, 'samples',
+            tip='Guard samples copied from each symbol\'s tail. Larger absorbs more echo / '
+                'timing slop at the cost of bitrate. ~1/8 of FFT size is typical.')
+        self._ofdm_fmin = self._slider_row(self._ofdm_frame, 'Min freq (Hz)',   2, 200, 2000, 500,   50, 'Hz',
+            tip='Low edge of the data band. Keep above the constant-power carrier (≈300 Hz) '
+                'and above the deck\'s bass roll-off (~300 Hz).')
+        self._ofdm_fmax = self._slider_row(self._ofdm_frame, 'Max freq (Hz)',   3,2000, 8000,6000,  100, 'Hz',
+            tip='High edge of the data band. A cheap ferric tape falls off a cliff near '
+                '6 kHz; a good deck/chrome tape can go higher.')
+        self._ofdm_pilot= self._slider_row(self._ofdm_frame, 'Pilot interval',  4,   2,   20,   8,    1, 'carriers',
+            tip='Every Nth subcarrier is a pilot (carries no data) used to track phase '
+                'drift. Smaller = more robust, lower bitrate.')
         ttk.Label(self._ofdm_frame, text='Phases/carrier').grid(row=5, column=0, sticky='w', padx=4)
         self._ofdm_phases = tk.IntVar(value=4)
         of = ttk.Frame(self._ofdm_frame)
@@ -390,22 +439,37 @@ class EncoderGUI:
         self._cp_var    = tk.BooleanVar(value=False)
         self._pe_var    = tk.BooleanVar(value=False)
         self._rs_var    = tk.BooleanVar(value=True)
-        ttk.Checkbutton(af, text='Constant-power carrier (AGC management)',
-                        variable=self._cp_var, command=self._update_bitrate).grid(
-            row=0, column=0, columnspan=2, sticky='w', pady=2)
-        self._cp_hz   = self._slider_row(af, '  Carrier freq (Hz)', 1,  50, 800, 300, 10, 'Hz')
-        ttk.Checkbutton(af, text='Pre-emphasis / de-emphasis',
-                        variable=self._pe_var, command=self._update_bitrate).grid(
-            row=2, column=0, columnspan=2, sticky='w', pady=2)
-        self._pe_alpha = self._slider_row(af, '  Alpha', 3, 0.50, 0.99, 0.85, 0.01, '')
-        ttk.Checkbutton(af, text='Reed-Solomon error correction' +
+        cp_cb = ttk.Checkbutton(af, text='Constant-power carrier (AGC management)',
+                        variable=self._cp_var, command=self._update_bitrate)
+        cp_cb.grid(row=0, column=0, columnspan=2, sticky='w', pady=2)
+        Tooltip(cp_cb, 'Adds a steady low tone so total volume never dips, pinning a cassette '
+                       'deck\'s automatic gain control so it stops hunting. Needed for real '
+                       'AGC decks. WORKS for FSK/4-FSK/DPSK; still loses bits with OFDM — '
+                       'leave off for OFDM for now.')
+        self._cp_hz   = self._slider_row(af, '  Carrier freq (Hz)', 1,  50, 800, 300, 10, 'Hz',
+            tip='Frequency of the AGC-pinning tone. Keep it below the data band.')
+        pe_cb = ttk.Checkbutton(af, text='Pre-emphasis / de-emphasis',
+                        variable=self._pe_var, command=self._update_bitrate)
+        pe_cb.grid(row=2, column=0, columnspan=2, sticky='w', pady=2)
+        Tooltip(pe_cb, 'Boosts highs before recording and cuts them on playback, lifting weak '
+                       'high frequencies above tape hiss. Decoder MUST use the same setting.')
+        self._pe_alpha = self._slider_row(af, '  Alpha', 3, 0.50, 0.99, 0.85, 0.01, '',
+            tip='Strength of the high-frequency boost (0.5–0.99). Higher = more boost.')
+        rs_cb = ttk.Checkbutton(af, text='Reed-Solomon error correction' +
                         ('' if HAS_RS else '  [reedsolo not installed]'),
                         variable=self._rs_var, command=self._update_bitrate,
-                        state='normal' if HAS_RS else 'disabled').grid(
-            row=4, column=0, columnspan=2, sticky='w', pady=2)
-        self._rs_nsym  = self._slider_row(af, '  Parity symbols', 5, 4, 64, 16, 2, 'bytes')
-        self._blk_size = self._slider_row(af, 'Block payload size', 6, 32, 1024, 256, 32, 'bytes')
-        self._preamble = self._slider_row(af, 'Preamble duration', 7, 50, 1000, 250, 50, 'ms')
+                        state='normal' if HAS_RS else 'disabled')
+        rs_cb.grid(row=4, column=0, columnspan=2, sticky='w', pady=2)
+        Tooltip(rs_cb, 'Forward error correction: repairs blocks damaged by tape dropouts at '
+                       'the cost of some bitrate. Strongly recommended for real tape.')
+        self._rs_nsym  = self._slider_row(af, '  Parity symbols', 5, 4, 64, 16, 2, 'bytes',
+            tip='Parity bytes per block. More = corrects more errors, lower net bitrate. '
+                'Can repair up to (parity/2) bad bytes per 255-byte chunk.')
+        self._blk_size = self._slider_row(af, 'Block payload size', 6, 32, 1024, 256, 32, 'bytes',
+            tip='Data bytes per framed block. Bigger = less framing overhead but a single '
+                'uncorrectable dropout loses more data.')
+        self._preamble = self._slider_row(af, 'Preamble duration', 7, 50, 1000, 250, 50, 'ms',
+            tip='Length of the lead-in tone that settles the deck\'s AGC before data starts.')
 
         # Sample rate
         ttk.Label(af, text='Sample rate').grid(row=8, column=0, sticky='w', padx=4)
@@ -418,11 +482,14 @@ class EncoderGUI:
 
         self._method_changed()
 
-    def _slider_row(self, parent, label, row, lo, hi, default, res, suffix) -> SliderEntry:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=4, pady=1)
+    def _slider_row(self, parent, label, row, lo, hi, default, res, suffix, tip='') -> SliderEntry:
+        lbl = ttk.Label(parent, text=label)
+        lbl.grid(row=row, column=0, sticky='w', padx=4, pady=1)
         w = SliderEntry(parent, from_=lo, to=hi, default=default,
                         resolution=res, suffix=suffix, command=self._update_bitrate)
         w.grid(row=row, column=1, sticky='ew', padx=4, pady=1)
+        if tip:
+            Tooltip(lbl, tip); Tooltip(w, tip)
         return w
 
     def _method_changed(self, *_):
@@ -451,27 +518,43 @@ class EncoderGUI:
         ttk.Combobox(f, textvariable=self._codec_var, values=self.CODECS,
                      state='readonly', width=16).grid(row=0, column=1, sticky='w', padx=4)
 
-        self._v_w   = self._slider_row(f, 'Width',          1,  64, 1280, 256,  16, 'px')
-        self._v_h   = self._slider_row(f, 'Height',         2,  32,  720, 144,   8, 'px')
-        self._v_fps = self._slider_row(f, 'Frame rate',     3,   1,   60,  15,   1, 'fps')
+        self._v_w   = self._slider_row(f, 'Width',          1,  64, 1280, 256,  16, 'px',
+            tip='Output width. A cassette\'s tiny bitrate forces small frames — 160–256 px '
+                'wide is realistic. Bigger needs a higher CRF (worse quality) to fit.')
+        self._v_h   = self._slider_row(f, 'Height',         2,  32,  720, 144,   8, 'px',
+            tip='Output height. Pair with width for your aspect ratio (256×144 ≈ 16:9).')
+        self._v_fps = self._slider_row(f, 'Frame rate',     3,   1,   60,  15,   1, 'fps',
+            tip='Frames per second. Lower fps spends the scarce bitrate on fewer, better '
+                'frames — 10–15 fps is a good tape trade-off.')
         self._v_crf = self._slider_row(f, 'CRF quality',    4,   0,   63,  40,   1,
-                                       '(lower=better)')
-        self._v_gop = self._slider_row(f, 'GOP (keyframe)', 5,   1,   60,  10,   1, 's')
+                                       '(lower=better)',
+            tip='Quality vs size. LOWER = better quality, more bits. On a cassette you '
+                'need a HIGH CRF (35–45) to fit; watch the bitrate bar below.')
+        self._v_gop = self._slider_row(f, 'GOP (keyframe)', 5,   1,   60,  10,   1, 's',
+            tip='Seconds between keyframes. Longer = smaller files; shorter = recovers '
+                'faster after a tape dropout and seeks/pauses cleaner.')
 
         self._gray_var   = tk.BooleanVar(value=True)
         self._bframe_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f, text='Grayscale (saves ~35% bitrate)',
-                        variable=self._gray_var).grid(
-            row=6, column=0, columnspan=2, sticky='w', padx=4, pady=3)
-        ttk.Checkbutton(f, text='B-frames (better compression but adds latency/buffering)',
-                        variable=self._bframe_var).grid(
-            row=7, column=0, columnspan=2, sticky='w', padx=4, pady=3)
+        gray_cb = ttk.Checkbutton(f, text='Grayscale (saves ~35% bitrate)',
+                        variable=self._gray_var)
+        gray_cb.grid(row=6, column=0, columnspan=2, sticky='w', padx=4, pady=3)
+        Tooltip(gray_cb, 'Drop colour. On a cassette\'s tiny bitrate, grayscale buys a big '
+                         'quality gain — usually worth it.')
+        bf_cb = ttk.Checkbutton(f, text='B-frames (better compression but adds latency/buffering)',
+                        variable=self._bframe_var)
+        bf_cb.grid(row=7, column=0, columnspan=2, sticky='w', padx=4, pady=3)
+        Tooltip(bf_cb, 'Bi-directional frames compress better but need look-ahead buffering, '
+                       'adding latency to live playback. Off = lower-latency P-frames only.')
 
-    def _slider_row(self, parent, label, row, lo, hi, default, res, suffix) -> SliderEntry:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=4, pady=1)
+    def _slider_row(self, parent, label, row, lo, hi, default, res, suffix, tip='') -> SliderEntry:
+        lbl = ttk.Label(parent, text=label)
+        lbl.grid(row=row, column=0, sticky='w', padx=4, pady=1)
         w = SliderEntry(parent, from_=lo, to=hi, default=default,
                         resolution=res, suffix=suffix, command=self._update_bitrate)
         w.grid(row=row, column=1, sticky='ew', padx=4, pady=1)
+        if tip:
+            Tooltip(lbl, tip); Tooltip(w, tip)
         return w
 
     # ── Bottom bar ────────────────────────────────────────────────────────────
