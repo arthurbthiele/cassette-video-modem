@@ -1,0 +1,10 @@
+numpy>=1.24
+scipy>=1.10
+sounddevice>=0.4.6
+Pillow>=10.0
+reedsolo>=1.7.0
+crcmod>=1.7
+# also requires ffmpeg on PATH
+# Windows: winget install ffmpeg
+# Linux:   apt install ffmpeg
+# Mac:     brew install ffmpeg
