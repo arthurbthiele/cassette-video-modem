@@ -16,7 +16,8 @@ import numpy as np
 # Must be in the same directory
 from cassette_modem import (
     ModemSettings, modulate, frame_block, generate_preamble,
-    add_constant_power_carrier, block_wire_size, calculate_bitrate, HAS_RS
+    add_constant_power_carrier, block_wire_size, calculate_bitrate, HAS_RS,
+    encode_metadata_block, TRAIN_BYTES,
 )
 
 
@@ -83,25 +84,41 @@ def ffmpeg_encode_video(input_path: str, vset: dict,
 
 
 def encode_to_wav(video_bytes: bytes, output_path: str,
-                  ms: ModemSettings, progress_cb=None):
-    """Modulate video bytes and write a 16-bit mono WAV file."""
+                  ms: ModemSettings, vset: Optional[dict] = None,
+                  progress_cb=None):
+    """Modulate video bytes and write a 16-bit mono WAV file.
+
+    The whole frame stream is modulated in a SINGLE call so the differential
+    phase chain (DPSK/OFDM) is never broken at a block boundary. Layout:
+        [tone lead-in] [TRAIN_BYTES] [metadata block] [data block 0..n] [silence]
+    where everything after the tone is one continuous modulation.
+    """
     sr         = ms.sample_rate
     block_size = ms.block_data_size
     n_blocks   = -(-len(video_bytes) // block_size)   # ceiling
-    preamble   = generate_preamble(ms)
-    all_chunks = [preamble]
 
+    # Build the full byte stream: training lead, metadata, then framed payload.
+    stream = bytearray(TRAIN_BYTES)
+    if vset is not None:
+        stream += encode_metadata_block(vset, ms)
     for i in range(n_blocks):
-        chunk  = video_bytes[i * block_size: (i + 1) * block_size]
-        framed = frame_block(chunk, i, ms)
-        audio  = modulate(framed, ms)
-        all_chunks.append(audio)
-        if progress_cb and i % 10 == 0:
-            progress_cb(i / n_blocks)
+        # Pad every block to a uniform payload size so the decoder can read a
+        # fixed wire size; the final short block is zero-filled.
+        chunk   = video_bytes[i * block_size: (i + 1) * block_size]
+        chunk   = chunk.ljust(block_size, b"\x00")
+        stream += frame_block(chunk, i, ms)
+        if progress_cb and i % 25 == 0:
+            progress_cb(0.5 * i / max(1, n_blocks))   # framing is first half
 
-    # Short silence postamble (lets AGC settle before tape end)
-    all_chunks.append(np.zeros(int(sr * 0.5)))
-    audio = np.concatenate(all_chunks)
+    if progress_cb:
+        progress_cb(0.5)
+    data_audio = modulate(bytes(stream), ms)
+    if progress_cb:
+        progress_cb(0.95)
+
+    # Pure-tone lead-in pins the AGC before any data; silence tail lets it settle.
+    tone = generate_preamble(ms)
+    audio = np.concatenate([tone, data_audio, np.zeros(int(sr * 0.5))])
 
     if ms.constant_power:
         audio = add_constant_power_carrier(audio, ms)
@@ -624,7 +641,7 @@ class EncoderGUI:
             def progress(p):
                 self._prog_var.set(p)
 
-            encode_to_wav(video_bytes, out, ms, progress_cb=progress)
+            encode_to_wav(video_bytes, out, ms, vset=vset, progress_cb=progress)
             self._set_status(f'Done → {out}')
         except Exception as e:
             self._set_status(f'Error: {e}')

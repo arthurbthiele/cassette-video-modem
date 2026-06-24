@@ -28,6 +28,11 @@ HEADER_SIZE      = struct.calcsize(HEADER_FMT)   # 12 bytes
 CRC_SIZE         = 4
 FLAG_RS          = 0x01
 
+# Bytes modulated ahead of the real payload. They give the OFDM timing-recovery
+# a few symbols to lock onto and absorb the one differential-chain-entry symbol
+# that decodes against a zero reference. Not framed; never decoded.
+TRAIN_BYTES      = bytes([0xAA, 0x55]) * 64
+
 _GRAY_DEC: Dict[int, List[int]] = {2:[0,1], 4:[0,1,3,2], 8:[0,1,3,2,6,7,5,4]}
 _GRAY_ENC: Dict[int,Dict[int,int]] = {n:{v:i for i,v in enumerate(t)} for n,t in _GRAY_DEC.items()}
 
@@ -157,18 +162,30 @@ def block_wire_size(s: ModemSettings) -> int:
 
 # ── Metadata block ────────────────────────────────────────────────────────────
 def encode_metadata_block(vset: dict, ms: ModemSettings) -> bytes:
-    """First block in every encoded file — carries video params and modem config."""
+    """First framed block in every encoded file — carries video params and modem
+    config. Padded to block_data_size so every block on the wire is uniform
+    (the decoder reads a fixed block size); trailing NULs are stripped on decode."""
+    # Only video params + headline modem identity. The decoder must already be
+    # configured with the matching modem settings to demodulate this block at
+    # all, so the full modem config would be redundant — and it must fit one
+    # fixed-size block. Video params drive resolution auto-detect on decode.
     payload = json.dumps({
         "_type":    "cassette-meta",
         "_version": 2,
         "video":    vset,
-        "modem":    json.loads(ms.to_json()),
+        "method":   ms.method,
+        "sr":       ms.sample_rate,
     }, separators=(",", ":")).encode()
+    if len(payload) > ms.block_data_size:
+        logger.warning("metadata (%d B) exceeds block_data_size (%d B); truncated",
+                       len(payload), ms.block_data_size)
+        payload = payload[:ms.block_data_size]
+    payload = payload.ljust(ms.block_data_size, b"\x00")
     return frame_block(payload, METADATA_SEQ, ms)
 
 def decode_metadata_payload(payload: bytes) -> Optional[dict]:
     try:
-        d = json.loads(payload.decode())
+        d = json.loads(payload.rstrip(b"\x00").decode())
         return d if d.get("_type") == "cassette-meta" else None
     except Exception:
         return None
@@ -213,6 +230,15 @@ def apply_pre_emphasis(audio: np.ndarray, alpha: float) -> np.ndarray:
 def apply_de_emphasis(audio: np.ndarray, alpha: float) -> np.ndarray:
     return spsg.lfilter([1.0], [1.0, -alpha], audio)
 
+def _carrier_strip_cut(s: ModemSettings) -> float:
+    """Normalised high-pass cutoff to remove the constant-power AGC carrier.
+    Sits just above the carrier but below the data band so it can't eat low
+    OFDM subcarriers."""
+    hi = s.constant_power_carrier_hz * 1.3
+    if s.method == "ofdm":
+        hi = min(hi, s.ofdm_f_min - 50)
+    return max(0.002, hi / (s.sample_rate / 2.0))
+
 def add_constant_power_carrier(audio: np.ndarray, s: ModemSettings) -> np.ndarray:
     """
     Mix a variable-amplitude anchor carrier so total RMS stays constant.
@@ -230,7 +256,10 @@ def add_constant_power_carrier(audio: np.ndarray, s: ModemSettings) -> np.ndarra
     rms = np.sqrt(np.mean(mixed**2))
     if rms > 1e-9:
         mixed *= target / rms
-    return np.clip(mixed, -1.0, 1.0)
+    # No clipping here: it's a nonlinearity that pre-emphasis (which boosts
+    # peaks) would push the signal into, corrupting phase-based demods. The
+    # caller normalises to the WAV's full scale afterwards anyway.
+    return mixed
 
 
 # ── FSK (2-tone, phase-continuous) ────────────────────────────────────────────
@@ -355,6 +384,60 @@ def demodulate_dpsk(audio: np.ndarray, s: ModemSettings) -> List[int]:
 
 
 # ── OFDM ─────────────────────────────────────────────────────────────────────
+def ofdm_timing_offset(audio: np.ndarray, s: ModemSettings,
+                       min_confidence: float = 0.45) -> Optional[int]:
+    """Find the symbol-start offset in [0, N+CP) via cyclic-prefix correlation.
+
+    The CP is a copy of each symbol's last CP samples, so y[d+m] ≈ y[d+m+N]
+    for m in [0,CP) exactly when d sits on a symbol boundary. We scan every
+    candidate offset across the whole buffer and pick the one with the highest
+    energy-weighted normalised correlation. Returns None until that peak is
+    confident enough to lock — i.e. real OFDM (not just the preamble tone or
+    noise) is present.
+    """
+    N, CP = s.ofdm_fft_size, s.ofdm_cp_size
+    SL    = N + CP
+    if len(audio) < 3 * SL:
+        return None
+    raw_energy = float(np.dot(audio, audio))
+    # High-pass below the data band so the 300 Hz preamble/AGC tone — a pure
+    # sine that self-correlates and would create a spurious CP peak — can't
+    # capture the estimate. CP correlation is preserved through linear filtering.
+    cut = min(0.95, max(0.01, (s.ofdm_f_min - 50) / (s.sample_rate / 2.0)))
+    bhp, ahp = spsg.butter(6, cut, btype="high")
+    audio = spsg.lfilter(bhp, ahp, audio).astype(np.float64)
+    nsym  = (len(audio) - N - CP) // SL
+    if nsym < 2:
+        return None
+    # Reject silence via an absolute in-band energy floor.
+    if float(np.dot(audio, audio)) < 1e-4 * len(audio):
+        return None
+    scores = np.empty(SL)
+    for d in range(SL):
+        num = den = 0.0
+        for k in range(nsym):
+            base = d + k * SL
+            a = audio[base:base + CP]
+            b = audio[base + N:base + N + CP]
+            if len(b) < CP:
+                break
+            # Energy-weighted: silent (tone/gap) windows contribute nothing,
+            # so the data region drives the estimate.
+            num += abs(np.dot(a, b))
+            den += 0.5 * (np.dot(a, a) + np.dot(b, b))
+        scores[d] = num / (den + 1e-12)
+    best_d = int(np.argmax(scores))
+    best_score = float(scores[best_d])
+    # A pure sinusoid (the preamble tone, or a loud out-of-band AGC carrier)
+    # correlates FLATLY across every offset; real OFDM produces a sharp peak at
+    # one offset. Gate on peakiness (peak vs median) so neither tone nor carrier
+    # can trigger a false lock, while genuine OFDM passes regardless of carrier.
+    median = float(np.median(scores)) + 1e-9
+    if best_score >= min_confidence and best_score >= 1.4 * median:
+        return best_d
+    return None
+
+
 def _ofdm_carriers(s: ModemSettings) -> Tuple[List[int], List[int]]:
     res  = s.sample_rate / s.ofdm_fft_size
     k_lo = max(1, int(np.ceil(s.ofdm_f_min/res)))
@@ -416,15 +499,14 @@ def demodulate_ofdm(audio: np.ndarray, s: ModemSettings) -> List[int]:
 
 # ── Preamble ──────────────────────────────────────────────────────────────────
 def generate_preamble(s: ModemSettings) -> np.ndarray:
+    """Pure-tone lead-in. Pins the AGC to its floor before any data arrives.
+
+    The modulated training that used to live here is now TRAIN_BYTES, modulated
+    continuously with the payload so the differential phase chain stays unbroken.
+    """
     n    = int(s.sample_rate * s.preamble_ms / 1000)
     t    = np.arange(n) / s.sample_rate
-    tone = 0.85 * np.sin(2.0*np.pi*s.constant_power_carrier_hz*t)
-    tb   = bytes([0xAA, 0x55]*4)
-    if   s.method == "fsk":  sig = modulate_fsk(tb, s)
-    elif s.method == "fsk4": sig = modulate_fsk4(tb, s)
-    elif s.method == "dpsk": sig = modulate_dpsk(tb, s)
-    else:                    sig = modulate_ofdm(tb, s)
-    return np.concatenate([tone, sig])
+    return 0.85 * np.sin(2.0*np.pi*s.constant_power_carrier_hz*t)
 
 
 # ── Top-level modulate / demodulate ──────────────────────────────────────────
@@ -448,9 +530,9 @@ def _demod_raw(audio: np.ndarray, s: ModemSettings) -> List[int]:
 def demodulate(audio: np.ndarray, s: ModemSettings) -> bytes:
     # Strip carrier BEFORE de-emphasis (reverse of encode order)
     if s.constant_power:
-        cut = min(0.95, s.constant_power_carrier_hz * 2.0 / (s.sample_rate / 2.0))
+        cut = min(0.95, _carrier_strip_cut(s))
         if cut > 0.002:
-            b, a = spsg.butter(1, cut, btype="high")
+            b, a = spsg.butter(4, cut, btype="high")
             audio = spsg.lfilter(b, a, audio)
     if s.pre_emphasis:
         audio = apply_de_emphasis(audio, s.pre_emphasis_alpha)
@@ -486,8 +568,9 @@ class DecoderState:
 
     def __init__(self, s: ModemSettings):
         self.s         = s
-        self._buf      = bytearray()
-        self._partial  = np.array([], dtype=np.float32)
+        self._bits     = bytearray()              # accumulated demod bits (one per byte, value 0/1)
+        self._partial  = np.array([], dtype=np.float32)   # leftover RAW samples (< 1 symbol)
+        self._prev_tail: Optional[np.ndarray] = None      # last decoded symbol, for differential continuity
         self._last_sig = 0.0
         self.is_paused = False
         self._seen     : dict = {}
@@ -495,7 +578,12 @@ class DecoderState:
         self._hp_b = self._hp_a = self._hp_zi = None
         self._de_b = self._de_a = self._de_zi = None
         self._init_filters()
-        self._sps = self._calc_sps()
+        self._sps            = self._calc_sps()
+        self._bits_per_block = self._calc_bits_per_block()
+        # OFDM needs sub-symbol timing recovery before the symbol grid is valid;
+        # other methods detect bytes via bit-level sync search and don't.
+        self._needs_lock = (s.method == "ofdm")
+        self._locked     = not self._needs_lock
 
     def _calc_sps(self) -> int:
         s = self.s
@@ -504,12 +592,25 @@ class DecoderState:
         if s.method == "dpsk": return max(1, int(s.sample_rate/s.dpsk_baud))
         return s.ofdm_fft_size + s.ofdm_cp_size
 
+    def _calc_bits_per_block(self) -> int:
+        """Bits emitted by _demod_raw for one symbol-block (_sps samples).
+        Used to discard the overlap reference symbol on each chunk."""
+        s = self.s
+        if s.method == "fsk":  return 1
+        if s.method == "fsk4": return 2
+        if s.method == "dpsk": return int(np.log2(s.dpsk_phases))
+        dc, _ = _ofdm_carriers(s)
+        return len(dc) * int(np.log2(s.ofdm_phases))
+
     def _init_filters(self):
         s = self.s
         if s.constant_power:
-            cut = min(0.95, s.constant_power_carrier_hz * 2.0 / (s.sample_rate / 2.0))
+            # Strip the AGC carrier just above its frequency — NOT at 2× it,
+            # which would eat the lowest OFDM subcarriers (f_min can be 500 Hz
+            # with a 300 Hz carrier). Order 4 gives enough rejection that close.
+            cut = min(0.95, _carrier_strip_cut(s))
             if cut > 0.002:
-                b, a = spsg.butter(1, cut, btype="high")
+                b, a = spsg.butter(4, cut, btype="high")
                 self._hp_b, self._hp_a = b, a
                 self._hp_zi = spsg.lfilter_zi(b, a) * 0.0
         if s.pre_emphasis:
@@ -525,6 +626,7 @@ class DecoderState:
         return audio
 
     def feed_audio(self, chunk: np.ndarray) -> List[Tuple[int, bytes]]:
+        chunk = chunk.astype(np.float32)
         rms = float(np.sqrt(np.mean(chunk**2)))
         now = time.monotonic()
         if rms > self.PAUSE_THRESHOLD:
@@ -532,30 +634,80 @@ class DecoderState:
         elif now - self._last_sig > self.PAUSE_TIMEOUT:
             self.is_paused = True; return []
 
-        work = np.concatenate([self._partial, chunk.astype(np.float32)])
-        nc   = (len(work)//self._sps)*self._sps
-        self._partial = work[nc:]
+        # Accumulate RAW samples; demodulate only whole symbols. The leftover
+        # (< 1 symbol) is carried unfiltered so the next call filters a
+        # contiguous stream and the IIR zi state stays valid.
+        new = np.concatenate([self._partial, chunk])
+
+        # OFDM: recover the symbol-start offset once via CP correlation, then
+        # drop the pre-roll so the symbol grid aligns from here on.
+        if not self._locked:
+            if len(new) < 4 * self._sps:
+                self._partial = new
+                return []
+            offset = ofdm_timing_offset(new, self.s)
+            if offset is None:
+                self._partial = new
+                return []
+            new = new[offset:]
+            self._locked = True
+
+        nc  = (len(new)//self._sps)*self._sps
+        self._partial = new[nc:]
         if nc == 0: return []
 
-        self._buf.extend(bits_to_bytes(_demod_raw(self._preprocess(work[:nc]), self.s)))
+        proc = self._preprocess(new[:nc])
+        # Prepend the previous symbol so differential demods (DPSK/OFDM) have the
+        # correct phase reference across the chunk boundary; drop its output bits.
+        if self._prev_tail is not None:
+            audio = np.concatenate([self._prev_tail, proc])
+            bits  = _demod_raw(audio, self.s)[self._bits_per_block:]
+        else:
+            bits  = _demod_raw(proc, self.s)
+        self._prev_tail = proc[-self._sps:].copy()
+
+        self._bits.extend(bits)
         return self._extract_blocks()
 
+    def _find_sync(self, arr: np.ndarray, start_bit: int) -> int:
+        """Earliest bit position >= start_bit where SYNC_MAGIC begins.
+        Searches every bit phase, so a byte-misaligned preamble can't hide it."""
+        best = -1
+        for off in range(8):
+            seg = arr[off:]
+            m   = (len(seg)//8)*8
+            if m < len(SYNC_MAGIC)*8:
+                continue
+            packed = np.packbits(seg[:m]).tobytes()
+            i = packed.find(SYNC_MAGIC)
+            while i != -1:
+                bitpos = off + i*8
+                if bitpos >= start_bit:
+                    if best == -1 or bitpos < best:
+                        best = bitpos
+                    break
+                i = packed.find(SYNC_MAGIC, i+1)
+        return best
+
     def _extract_blocks(self) -> List[Tuple[int, bytes]]:
-        found = []; buf = bytes(self._buf); pos = 0; consumed = 0
-        needed = block_wire_size(self.s)
+        found       = []
+        needed_bits = block_wire_size(self.s) * 8
+        arr         = np.frombuffer(bytes(self._bits), dtype=np.uint8)
+        pos = 0; consumed = 0
         while True:
-            idx = buf.find(SYNC_MAGIC, pos)
+            idx = self._find_sync(arr, pos)
             if idx == -1:
-                consumed = max(0, len(buf)-len(SYNC_MAGIC)+1); break
-            if idx + needed > len(buf):
+                consumed = max(0, len(arr) - (len(SYNC_MAGIC)*8 - 1)); break
+            if idx + needed_bits > len(arr):
                 consumed = idx; break
-            result = deframe_block(buf[idx:idx+needed], self.s)
+            block_bytes = np.packbits(arr[idx:idx+needed_bits]).tobytes()
+            result = deframe_block(block_bytes, self.s)
             if result is not None:
                 seq, payload = result
                 if seq not in self._seen:
                     self._seen[seq] = True; found.append((seq, payload))
-                consumed = idx+needed; pos = consumed
+                consumed = idx + needed_bits; pos = consumed
             else:
-                pos = idx+1
-        self._buf = bytearray(buf[consumed:])
+                pos = idx + 1
+        self._bits = bytearray(arr[consumed:].tobytes())
         return found
