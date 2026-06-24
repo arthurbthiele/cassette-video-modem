@@ -101,12 +101,14 @@ data sizes, three chunk sizes, and multiple random seeds (216 combinations).
 | **Real video round-trip** (ffmpeg encode → WAV → decode → ffmpeg frames) | ✅ byte-exact, all 4 methods |
 | **Both GUIs construct** (headless, hidden window) | ✅ |
 
-The test scripts are in the repo:
-- `tests_e2e.py` / `tests_robust.py` — software modem round-trip (numpy/scipy/
-  reedsolo/crcmod only; no ffmpeg or audio hardware needed).
-- `tests_video.py` — full **video** round-trip: makes a synthetic clip with
-  ffmpeg, runs the real encoder/decoder functions, confirms the recovered
+The test scripts are in `tests/`:
+- `tests/tests_e2e.py` / `tests/tests_robust.py` — software modem round-trip
+  (numpy/scipy/reedsolo/crcmod only; no ffmpeg or audio hardware needed).
+- `tests/tests_video.py` — full **video** round-trip: makes a synthetic clip
+  with ffmpeg, runs the real encoder/decoder functions, confirms the recovered
   mpegts is byte-exact and that frames decode. Needs ffmpeg + the GUI deps.
+- `tests/tests_channel.py` — runs the modem through the cassette-channel
+  simulator and reports robustness (see "Current frontier" below).
 
 We did get ffmpeg + a Tk-enabled Python installed and ran all of the above. The
 one thing still not done is an **interactive** click-through with live audio

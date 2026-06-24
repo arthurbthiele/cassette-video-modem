@@ -10,6 +10,7 @@ Generates a short synthetic clip with ffmpeg, so it needs no input file.
 Run:  python tests_video.py
 """
 import os, subprocess, tempfile, wave, queue, time, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from cassette_encoder import ffmpeg_encode_video, encode_to_wav, DEFAULT_VIDEO

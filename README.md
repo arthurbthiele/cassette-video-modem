@@ -34,8 +34,11 @@ with the constant-power AGC carrier. **OFDM + constant-power carrier** is the on
 known-imperfect combo (loses bits). See **[HANDOVER.md](HANDOVER.md)** for the
 full story of what was fixed and why, what's verified, and open questions.
 
-Software tests (no ffmpeg/audio needed): `python tests_e2e.py`,
-`python tests_robust.py`.
+Tests (run from anywhere, e.g. `python tests/tests_e2e.py`):
+
+- `tests/tests_e2e.py`, `tests/tests_robust.py` — software modem round-trip (no ffmpeg/audio needed)
+- `tests/tests_video.py` — full video round-trip (needs ffmpeg + GUI deps)
+- `tests/tests_channel.py` — robustness against the simulated cassette channel
 
 ## Files
 
@@ -44,6 +47,7 @@ Software tests (no ffmpeg/audio needed): `python tests_e2e.py`,
 | `cassette_modem.py` | DSP core: modulation, framing, Reed-Solomon, streaming decoder |
 | `cassette_encoder.py` | Encoder GUI |
 | `cassette_decoder.py` | Decoder GUI |
-| `tests_e2e.py`, `tests_robust.py` | Software round-trip tests |
+| `cassette_channel.py` | Cassette-channel simulator (a tuning/testing tool) |
+| `tests/` | Software, video, and channel-robustness tests |
+| `docs/original-brief.md` | skamlox's original project brief & research notes |
 | `HANDOVER.md` | What we changed and why; verified status; open questions |
-| `readme_main.md` | The original project brief & research notes |

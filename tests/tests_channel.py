@@ -9,6 +9,8 @@ channel before burning a tape.
 
     python tests_channel.py
 """
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from cassette_modem import (ModemSettings, DecoderState, METADATA_SEQ,
                             modulate, frame_block, generate_preamble,
