@@ -98,11 +98,21 @@ data sizes, three chunk sizes, and multiple random seeds (216 combinations).
 | **Constant-power carrier on** | ✅ FSK / 4-FSK / DPSK bit-exact |
 | Constant-power carrier on, **OFDM** | ❌ locks & decodes but loses bits — see below |
 | Metadata / resolution auto-detect | ✅ |
+| **Real video round-trip** (ffmpeg encode → WAV → decode → ffmpeg frames) | ✅ byte-exact, all 4 methods |
+| **Both GUIs construct** (headless, hidden window) | ✅ |
 
-The test scripts are in the repo: `tests_e2e.py` (the config matrix) and
-`tests_robust.py` (the sweep). Run them with numpy/scipy/reedsolo/crcmod
-installed; no ffmpeg or audio hardware needed — they exercise the modem in
-software.
+The test scripts are in the repo:
+- `tests_e2e.py` / `tests_robust.py` — software modem round-trip (numpy/scipy/
+  reedsolo/crcmod only; no ffmpeg or audio hardware needed).
+- `tests_video.py` — full **video** round-trip: makes a synthetic clip with
+  ffmpeg, runs the real encoder/decoder functions, confirms the recovered
+  mpegts is byte-exact and that frames decode. Needs ffmpeg + the GUI deps.
+
+We did get ffmpeg + a Tk-enabled Python installed and ran all of the above. The
+one thing still not done is an **interactive** click-through with live audio
+hardware (recording to/from an actual sound device) — the file-based path that
+the GUI's "WAV file (testing)" mode uses is fully exercised; the live-mic path
+is code-reviewed only.
 
 ---
 
@@ -122,13 +132,16 @@ software.
   option is "use OFDM for clean line-level/WAV, use DPSK when you need the AGC
   carrier on a hostile deck."
 
-- **We could not run the GUIs.** Arthur's machine doesn't have a Tk-enabled
-  Python or ffmpeg installed, so the GUI changes are compile-checked and
-  carefully reviewed but **not smoke-tested live**, and the ffmpeg video
-  playback glue is verified by inspection only. First thing to do on a real
-  machine: `pip install -r requirements.txt`, install ffmpeg, and run both GUIs
-  with a WAV round-trip (encode a short clip, then decode the WAV via the
-  decoder's "WAV file (testing)" source).
+- **Live audio hardware is untested.** The GUIs construct cleanly and the full
+  file-based video round-trip is verified, but recording/playing through a real
+  sound device (the decoder's "Live input" source) is code-reviewed only. On a
+  real machine, do an interactive sanity pass: `pip install -r requirements.txt`,
+  ensure ffmpeg is installed, encode a short clip, then decode the WAV via the
+  decoder's "WAV file (testing)" source before trying live line-in.
+
+  (While testing, live-running fixed a real bug: the decoder's video
+  reconstructor deadlocked on Stop — it halted the frame reader before closing
+  ffmpeg's input, so ffmpeg blocked writing to a full output pipe. Fixed.)
 
 - **Real-tape testing is still ahead.** Everything so far is a clean digital
   round-trip. The real channel (wow/flutter, dropouts, the actual AGC) is the

@@ -142,13 +142,24 @@ class VideoReconstructor:
                     pass
 
     def stop(self):
-        self._running = False
+        # Close stdin FIRST (signals EOF so ffmpeg flushes its final frames) and
+        # keep the reader draining stdout — otherwise ffmpeg blocks writing into
+        # a full, unread output pipe and never exits. Only stop the reader once
+        # ffmpeg has gone.
         if self._ffmpeg:
             try:
                 self._ffmpeg.stdin.close()
             except Exception:
                 pass
-            self._ffmpeg.wait(timeout=2)
+            try:
+                self._ffmpeg.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._ffmpeg.kill()
+                try:
+                    self._ffmpeg.wait(timeout=2)
+                except Exception:
+                    pass
+        self._running = False
 
     @property
     def stats(self):
