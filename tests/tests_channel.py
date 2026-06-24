@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from cassette_modem import (ModemSettings, DecoderState, METADATA_SEQ,
                             modulate, frame_block, generate_preamble,
-                            add_constant_power_carrier, encode_metadata_block, TRAIN_BYTES)
+                            add_constant_power_carrier, add_pilot_tone, pilot_resample,
+                            encode_metadata_block, TRAIN_BYTES)
 from cassette_channel import CassetteChannel, simulate_cassette
 
 SIZE = 8000
@@ -28,6 +29,8 @@ def _encode(video, ms):
         stream += frame_block(video[i*bs:(i+1)*bs].ljust(bs, b"\x00"), i, ms)
     audio = np.concatenate([generate_preamble(ms), modulate(bytes(stream), ms),
                             np.zeros(int(ms.sample_rate * 0.5))])
+    if ms.pilot_tone:
+        audio = add_pilot_tone(audio, ms)
     if ms.constant_power:
         audio = add_constant_power_carrier(audio, ms)
     peak = np.max(np.abs(audio))
@@ -35,6 +38,8 @@ def _encode(video, ms):
 
 
 def _decode(audio, ms):
+    if ms.pilot_tone:                       # the WAV-file decode path's correction
+        audio = pilot_resample(audio, ms)
     ds = DecoderState(ms)
     data = {}
     for i in range(0, len(audio), 4096):
@@ -59,25 +64,34 @@ def main():
                            dropout_per_sec=0.5, band_high_hz=6000),
     }
 
-    print(f"{'method':6s}" + "".join(f"{k:>14}" for k in presets))
-    for method in ["fsk", "fsk4", "dpsk", "ofdm"]:
-        ms = ModemSettings(method=method, reed_solomon=True)
-        clean, _ = _encode(video, ms)
-        cells = []
-        for name, kw in presets.items():
-            if kw is None:
-                sig = clean
-            else:
-                sig = simulate_cassette(clean, CassetteChannel(sample_rate=ms.sample_rate, **kw))
-            data = _decode(sig, ms)
-            recon = bytearray()
-            for i in range(nblk):
-                recon += data.get(i, b"\x00" * 256)
-            good = sum(1 for a, b in zip(bytes(recon)[:SIZE], video) if a == b)
-            cells.append(f"{100*good//SIZE}% {len(data)}/{nblk}")
-        print(f"{method:6s}" + "".join(f"{c:>14}" for c in cells))
-    print("\n(bytes-correct% and blocks-recovered. Wow & flutter is currently the "
-          "dominant failure — symbol-timing tracking is the key missing piece.)")
+    def run(label, make_ms):
+        print(f"\n{label}")
+        print(f"{'method':6s}" + "".join(f"{k:>14}" for k in presets))
+        for method in ["fsk", "fsk4", "dpsk", "ofdm"]:
+            ms = make_ms(method)
+            clean, _ = _encode(video, ms)
+            cells = []
+            for name, kw in presets.items():
+                sig = clean if kw is None else simulate_cassette(
+                    clean, CassetteChannel(sample_rate=ms.sample_rate, **kw))
+                data = _decode(sig, ms)
+                recon = bytearray()
+                for i in range(nblk):
+                    recon += data.get(i, b"\x00" * 256)
+                good = sum(1 for a, b in zip(bytes(recon)[:SIZE], video) if a == b)
+                cells.append(f"{100*good//SIZE}% {len(data)}/{nblk}")
+            print(f"{method:6s}" + "".join(f"{c:>14}" for c in cells))
+
+    run("PLAIN modem (no pilot):",
+        lambda m: ModemSettings(method=m, reed_solomon=True))
+    run("TAPE MODE (pilot tachometer; +constant-power for non-OFDM):",
+        lambda m: ModemSettings(method=m, reed_solomon=True, pilot_tone=True,
+                                ofdm_f_min=900 if m == "ofdm" else 500,
+                                constant_power=(m != "ofdm")))
+    print("\n(bytes-correct% and blocks-recovered. The pilot tachometer undoes wow & "
+          "flutter — the dominant impairment — lifting the robust methods from nothing "
+          "to usable on a degraded tape. OFDM+constant-power and live-stream de-tacho "
+          "are still open.)")
 
 
 if __name__ == "__main__":

@@ -84,6 +84,13 @@ class ModemSettings:
     pre_emphasis:       bool  = False
     pre_emphasis_alpha: float = 0.85
 
+    # Pilot-tone tachometer — a steady out-of-band tone used on decode to
+    # measure and undo the tape's speed wobble (wow & flutter). Off by default;
+    # the headline robustness feature for real tape.
+    pilot_tone: bool  = False
+    pilot_hz:   int   = 700
+    pilot_amp:  float = 0.18
+
     # Reed-Solomon
     reed_solomon: bool = True
     rs_nsym:      int  = 16
@@ -276,6 +283,45 @@ def add_constant_power_carrier(audio: np.ndarray, s: ModemSettings) -> np.ndarra
     # peaks) would push the signal into, corrupting phase-based demods. The
     # caller normalises to the WAV's full scale afterwards anyway.
     return mixed
+
+
+# ── Pilot-tone tachometer ──────────────────────────────────────────────────────
+def add_pilot_tone(audio: np.ndarray, s: ModemSettings) -> np.ndarray:
+    """Mix in a steady sine at pilot_hz. On playback its pitch wobbles with the
+    tape's wow & flutter; the decoder reads that wobble to undo the speed drift
+    (see pilot_resample). Place pilot_hz in the deck's flat passband but clear of
+    the data tones."""
+    t = np.arange(len(audio)) / s.sample_rate
+    return audio + s.pilot_amp * np.sin(2.0 * np.pi * s.pilot_hz * t)
+
+def pilot_resample(audio: np.ndarray, s: ModemSettings,
+                   bw: float = 40.0, smooth_hz: float = 20.0) -> np.ndarray:
+    """Undo wow & flutter by resampling onto a uniform time base recovered from
+    the pilot tone. Band-pass the pilot, track its phase, low-pass the
+    instantaneous frequency (wow/flutter is slow, so this rejects dropouts and
+    hiss), then resample so the pilot — and therefore the data — advances at a
+    constant rate. Returns audio of the same length. NON-streaming: needs the
+    whole signal (use it on a captured WAV before decoding)."""
+    sr  = s.sample_rate
+    nyq = sr / 2.0
+    lo  = max(1e-3, (s.pilot_hz - bw) / nyq)
+    hi  = min(0.999, (s.pilot_hz + bw) / nyq)
+    bb, ba = spsg.butter(4, [lo, hi], btype="band")
+    phase  = np.unwrap(np.angle(hilbert(spsg.lfilter(bb, ba, audio))))
+    inst   = np.diff(phase, prepend=phase[0])
+    lb, la = spsg.butter(2, min(0.99, smooth_hz / nyq), btype="low")
+    phase  = np.cumsum(spsg.filtfilt(lb, la, inst))
+    n      = len(audio)
+    delta  = 2.0 * np.pi * s.pilot_hz / sr
+    target = phase[0] + np.arange(n) * delta
+    idx    = np.interp(target, phase, np.arange(n))
+    out    = np.interp(np.clip(idx, 0, n - 1), np.arange(n), audio)
+    # Notch the pilot back out — it's served its purpose, and left in it would
+    # corrupt the phase-based demods (DPSK/OFDM) that read the whole spectrum.
+    # filtfilt (zero-phase) so the notch adds no group delay — a few samples of
+    # shift would wreck OFDM's symbol timing.
+    nb, na = spsg.butter(2, [lo, hi], btype="bandstop")
+    return spsg.filtfilt(nb, na, out).astype(np.float32)
 
 
 # ── FSK (2-tone, phase-continuous) ────────────────────────────────────────────

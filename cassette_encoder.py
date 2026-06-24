@@ -16,8 +16,8 @@ import numpy as np
 # Must be in the same directory
 from cassette_modem import (
     ModemSettings, modulate, frame_block, generate_preamble,
-    add_constant_power_carrier, block_wire_size, calculate_bitrate, HAS_RS,
-    encode_metadata_block, TRAIN_BYTES, ffmpeg_available, FFMPEG_INSTALL_HELP,
+    add_constant_power_carrier, add_pilot_tone, block_wire_size, calculate_bitrate,
+    HAS_RS, encode_metadata_block, TRAIN_BYTES, ffmpeg_available, FFMPEG_INSTALL_HELP,
 )
 
 
@@ -119,6 +119,10 @@ def encode_to_wav(video_bytes: bytes, output_path: str,
     # Pure-tone lead-in pins the AGC before any data; silence tail lets it settle.
     tone = generate_preamble(ms)
     audio = np.concatenate([tone, data_audio, np.zeros(int(sr * 0.5))])
+
+    # Pilot tone (added before the AGC carrier so constant-power balances both).
+    if ms.pilot_tone:
+        audio = add_pilot_tone(audio, ms)
 
     if ms.constant_power:
         audio = add_constant_power_carrier(audio, ms)
@@ -471,11 +475,23 @@ class EncoderGUI:
         self._preamble = self._slider_row(af, 'Preamble duration', 7, 50, 1000, 250, 50, 'ms',
             tip='Length of the lead-in tone that settles the deck\'s AGC before data starts.')
 
+        # Pilot-tone tachometer
+        self._pilot_var = tk.BooleanVar(value=False)
+        pilot_cb = ttk.Checkbutton(af, text='Pilot tone (wow & flutter correction for real tape)',
+                                   variable=self._pilot_var, command=self._update_bitrate)
+        pilot_cb.grid(row=8, column=0, columnspan=2, sticky='w', pady=2)
+        Tooltip(pilot_cb, 'Adds a steady reference tone so the decoder can measure the tape\'s '
+                          'pitch wobble and undo it. The key feature for real cassette playback. '
+                          'Decode the captured audio as a WAV file to apply the correction.')
+        self._pilot_hz = self._slider_row(af, '  Pilot freq (Hz)', 9, 400, 2000, 700, 50, 'Hz',
+            tip='Reference-tone frequency. Keep it in the deck\'s flat passband and clear of '
+                'the data tones (for OFDM, below the min freq).')
+
         # Sample rate
-        ttk.Label(af, text='Sample rate').grid(row=8, column=0, sticky='w', padx=4)
+        ttk.Label(af, text='Sample rate').grid(row=10, column=0, sticky='w', padx=4)
         self._sr_var = tk.IntVar(value=44100)
         srb = ttk.Frame(af)
-        srb.grid(row=8, column=1, sticky='w')
+        srb.grid(row=10, column=1, sticky='w')
         for sr in self.RATES:
             ttk.Radiobutton(srb, text=str(sr), variable=self._sr_var,
                             value=sr, command=self._update_bitrate).pack(side='left', padx=6)
@@ -614,6 +630,8 @@ class EncoderGUI:
             constant_power_carrier_hz = int(self._cp_hz.get()),
             pre_emphasis         = self._pe_var.get(),
             pre_emphasis_alpha   = round(self._pe_alpha.get(), 3),
+            pilot_tone           = self._pilot_var.get(),
+            pilot_hz             = int(self._pilot_hz.get()),
             reed_solomon         = self._rs_var.get() and HAS_RS,
             rs_nsym              = int(self._rs_nsym.get()),
             block_data_size      = int(self._blk_size.get()),
@@ -674,6 +692,7 @@ class EncoderGUI:
         self._ofdm_pilot.set(ms.ofdm_pilot_interval); self._ofdm_phases.set(ms.ofdm_phases)
         self._cp_var.set(ms.constant_power); self._cp_hz.set(ms.constant_power_carrier_hz)
         self._pe_var.set(ms.pre_emphasis); self._pe_alpha.set(ms.pre_emphasis_alpha)
+        self._pilot_var.set(ms.pilot_tone); self._pilot_hz.set(ms.pilot_hz)
         self._rs_var.set(ms.reed_solomon); self._rs_nsym.set(ms.rs_nsym)
         self._blk_size.set(ms.block_data_size); self._preamble.set(ms.preamble_ms)
         if 'video' in blob:

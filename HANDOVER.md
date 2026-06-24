@@ -145,15 +145,36 @@ is code-reviewed only.
   reconstructor deadlocked on Stop — it halted the frame reader before closing
   ffmpeg's input, so ffmpeg blocked writing to a full output pipe. Fixed.)
 
-- **Real-tape testing is still ahead.** Everything so far is a clean digital
-  round-trip. The real channel (wow/flutter, dropouts, the actual AGC) is the
-  next frontier — and where your notes' wishlist comes in.
+- **Real-tape testing is still ahead.** Everything is verified against the
+  channel *simulator*, not a physical tape yet. But the simulator told us where
+  the real fight is (see next point) and let us land the first mitigation.
 
-- **The advanced wishlist is unimplemented** (chirp lead-in for group-delay
-  calibration, pilot-tone tachometer for wow/flutter, Trellis-coded modulation,
-  LDPC). They're real and valuable but were filed under "future," and the right
-  order was "make it work first." The OFDM pilot carriers currently do per-symbol
-  common-phase correction, which is a start.
+- **Pilot-tone tachometer — implemented, and it works for FSK.** This is the
+  readme's wow/flutter fix: the encoder adds a steady out-of-band pilot tone
+  ("Pilot tone" in the GUI); on decode, `pilot_resample()` reads the pilot's
+  pitch wobble and resamples the audio back to a uniform rate, un-warping the
+  data. Applied automatically when you decode a captured **WAV file** with the
+  pilot setting on (the realistic "record to tape → capture to WAV → decode"
+  workflow). Results through the channel simulator (blocks recovered):
+
+  | method | plain, "decent" tape | **pilot, "decent" tape** |
+  |---|---|---|
+  | FSK  | 0/32 | **24/32** |
+  | 4-FSK | 0/32 | (helps on a good deck) |
+
+  So **FSK + pilot goes from useless to usable on a degraded tape** — watchable
+  video on a cheap deck is now plausible. Caveats, honestly: it's a clear win
+  for the *envelope* methods (FSK/4-FSK); for the *phase* methods (DPSK/OFDM)
+  the whole-signal resampling adds jitter that hurts more than it helps, so
+  **pilot is recommended with FSK** for now. It's opt-in (default off). Run
+  `tests/tests_channel.py` to see the full plain-vs-pilot table.
+
+- **Still open** (the rest of the readme's wishlist): per-*symbol* timing
+  tracking so the phase methods (DPSK/OFDM) also survive wow/flutter;
+  **live-stream** de-tacho (today the pilot correction is applied to a whole
+  captured WAV, not the real-time line-in); chirp lead-in for group-delay EQ;
+  Trellis-coded modulation; LDPC. The OFDM pilot *subcarriers* already do
+  per-symbol common-phase correction, which is a start on the first item.
 
 ---
 

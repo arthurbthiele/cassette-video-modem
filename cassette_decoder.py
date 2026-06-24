@@ -30,7 +30,7 @@ except ImportError:
 
 from cassette_modem import (
     ModemSettings, DecoderState, calculate_bitrate, HAS_RS,
-    SYNC_MAGIC, METADATA_SEQ, decode_metadata_payload,
+    SYNC_MAGIC, METADATA_SEQ, decode_metadata_payload, pilot_resample,
     ffmpeg_available, FFMPEG_INSTALL_HELP,
 )
 
@@ -214,33 +214,41 @@ class AudioInputThread(threading.Thread):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class WavFileThread(threading.Thread):
-    """Streams a WAV file as if it were live input (at real-time speed)."""
+    """Streams a WAV file as if it were live input (at real-time speed).
 
-    def __init__(self, path: str, chunk_ms: int = 100):
+    If `ms.pilot_tone` is set, the whole file is loaded and wow/flutter-corrected
+    (pilot_resample) up front before streaming — the realistic 'recorded a tape,
+    captured it to a WAV, now decode it' workflow."""
+
+    def __init__(self, path: str, ms: Optional[ModemSettings] = None, chunk_ms: int = 100):
         super().__init__(daemon=True)
-        self._path    = path
+        self._path     = path
+        self._ms       = ms
         self._chunk_ms = chunk_ms
         self.chunk_queue : queue.Queue = queue.Queue(maxsize=64)
         self._running = False
         self.error: Optional[str] = None
-        self.sample_rate = 44100
+        with wave.open(path) as wf:          # read the rate synchronously up front
+            self.sample_rate = wf.getframerate()
 
     def run(self):
         try:
             with wave.open(self._path) as wf:
-                self.sample_rate = wf.getframerate()
-                chunk_n = int(self.sample_rate * self._chunk_ms / 1000)
-                self._running = True
-                while self._running:
-                    raw = wf.readframes(chunk_n)
-                    if not raw:
-                        break
-                    arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-                    try:
-                        self.chunk_queue.put_nowait(arr)
-                    except queue.Full:
-                        pass
-                    time.sleep(self._chunk_ms / 1000)
+                raw = wf.readframes(wf.getnframes())
+            arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if self._ms is not None and self._ms.pilot_tone:
+                self._ms.sample_rate = self.sample_rate
+                arr = pilot_resample(arr, self._ms)
+            chunk_n = int(self.sample_rate * self._chunk_ms / 1000)
+            self._running = True
+            for i in range(0, len(arr), chunk_n):
+                if not self._running:
+                    break
+                try:
+                    self.chunk_queue.put_nowait(arr[i:i + chunk_n])
+                except queue.Full:
+                    pass
+                time.sleep(self._chunk_ms / 1000)
         except Exception as e:
             self.error = str(e)
 
@@ -584,6 +592,15 @@ class DecoderGUI:
         self._paus_time = self._se(f, 'Pause timeout',  8, 0.05, 2.0, 0.30, 0.05, 's',
             tip='How long the signal must stay low before showing PAUSED. Higher = less '
                 'jumpy on brief dropouts.')
+        self._pilot_var = tk.BooleanVar(value=False)
+        pilot_cb = ttk.Checkbutton(f, text='Pilot wow/flutter correction',
+                                   variable=self._pilot_var)
+        pilot_cb.grid(row=9, column=0, columnspan=2, sticky='w')
+        Tooltip(pilot_cb, 'MUST match the encoder. Uses the pilot tone to undo the tape\'s '
+                          'speed wobble. Applied when decoding a WAV file (not yet on the '
+                          'live input).')
+        self._pilot_hz  = self._se(f, 'Pilot Hz', 10, 400, 2000, 700, 50, 'Hz',
+            tip='Pilot frequency — must equal the encoder\'s.')
 
     def _build_video_tab(self, f):
         f.columnconfigure(1, weight=1)
@@ -671,6 +688,8 @@ class DecoderGUI:
             constant_power       = self._cp_var.get(),
             pre_emphasis         = self._pe_var.get(),
             pre_emphasis_alpha   = round(self._pe_alpha.get(), 3),
+            pilot_tone           = self._pilot_var.get(),
+            pilot_hz             = int(self._pilot_hz.get()),
             reed_solomon         = self._rs_var.get() and HAS_RS,
             rs_nsym              = int(self._rs_nsym.get()),
             block_data_size      = int(self._blk_size.get()),
@@ -710,9 +729,9 @@ class DecoderGUI:
             if not path or not os.path.isfile(path):
                 messagebox.showerror('Error', 'Select a valid WAV file.')
                 return
-            wft = WavFileThread(path)
-            wft.start()
+            wft = WavFileThread(path, ms)
             ms.sample_rate = wft.sample_rate
+            wft.start()
             self._audio_thread = wft
 
         if not ffmpeg_available():
@@ -871,6 +890,7 @@ class DecoderGUI:
         self._ofdm_pil.set(ms.ofdm_pilot_interval); self._ofdm_phases.set(ms.ofdm_phases)
         self._cp_var.set(ms.constant_power)
         self._pe_var.set(ms.pre_emphasis); self._pe_alpha.set(ms.pre_emphasis_alpha)
+        self._pilot_var.set(ms.pilot_tone); self._pilot_hz.set(ms.pilot_hz)
         self._rs_var.set(ms.reed_solomon); self._rs_nsym.set(ms.rs_nsym)
         self._blk_size.set(ms.block_data_size); self._cp_hz.set(ms.constant_power_carrier_hz)
         if 'video' in blob:
