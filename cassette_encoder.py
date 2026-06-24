@@ -17,7 +17,7 @@ import numpy as np
 from cassette_modem import (
     ModemSettings, modulate, frame_block, generate_preamble,
     add_constant_power_carrier, block_wire_size, calculate_bitrate, HAS_RS,
-    encode_metadata_block, TRAIN_BYTES,
+    encode_metadata_block, TRAIN_BYTES, ffmpeg_available, FFMPEG_INSTALL_HELP,
 )
 
 
@@ -384,8 +384,11 @@ class EncoderGUI:
         af = _lf(f, 'Signal conditioning & framing')
         af.grid(row=row, column=0, sticky='ew', pady=4); row += 1
         af.columnconfigure(1, weight=1)
-        self._cp_var    = tk.BooleanVar(value=True)
-        self._pe_var    = tk.BooleanVar(value=True)
+        # Default OFF: both are verified to round-trip on their own for the
+        # robust methods, but the constant-power carrier still loses bits with
+        # OFDM, so the safe out-of-the-box config is plain modulation + RS.
+        self._cp_var    = tk.BooleanVar(value=False)
+        self._pe_var    = tk.BooleanVar(value=False)
         self._rs_var    = tk.BooleanVar(value=True)
         ttk.Checkbutton(af, text='Constant-power carrier (AGC management)',
                         variable=self._cp_var, command=self._update_bitrate).grid(
@@ -610,6 +613,9 @@ class EncoderGUI:
             return
         if not out:
             messagebox.showerror('Error', 'Select an output WAV path.')
+            return
+        if not ffmpeg_available():
+            messagebox.showerror('ffmpeg not found', FFMPEG_INSTALL_HELP)
             return
 
         ms   = self._collect_modem_settings()

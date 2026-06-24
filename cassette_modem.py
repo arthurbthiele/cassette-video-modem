@@ -4,7 +4,7 @@ cassette_modem.py — Core DSP modem library.
 Shared by encoder and decoder. No GUI dependencies.
 """
 from __future__ import annotations
-import struct, json, logging, time
+import struct, json, logging, time, shutil
 from dataclasses import dataclass, asdict, fields as dc_fields
 from typing import List, Optional, Tuple, Dict
 import numpy as np
@@ -100,6 +100,22 @@ class ModemSettings:
         d  = json.loads(s)
         ok = {f.name for f in dc_fields(cls)}
         return cls(**{k: v for k, v in d.items() if k in ok})
+
+
+# ── ffmpeg presence ────────────────────────────────────────────────────────────
+FFMPEG_INSTALL_HELP = (
+    "ffmpeg was not found on your PATH. It is required to (re)encode and decode "
+    "the video.\n\n"
+    "  Windows:  winget install ffmpeg     (or: choco install ffmpeg)\n"
+    "  macOS:    brew install ffmpeg\n"
+    "  Linux:    sudo apt install ffmpeg   (or your distro's package manager)\n\n"
+    "After installing, restart this program (or your terminal) so the new PATH "
+    "takes effect."
+)
+
+def ffmpeg_available() -> bool:
+    """True if an ffmpeg binary is on PATH."""
+    return shutil.which("ffmpeg") is not None
 
 
 # ── CRC / RS ─────────────────────────────────────────────────────────────────

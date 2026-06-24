@@ -30,7 +30,8 @@ except ImportError:
 
 from cassette_modem import (
     ModemSettings, DecoderState, calculate_bitrate, HAS_RS,
-    SYNC_MAGIC
+    SYNC_MAGIC, METADATA_SEQ, decode_metadata_payload,
+    ffmpeg_available, FFMPEG_INSTALL_HELP,
 )
 
 
@@ -509,20 +510,26 @@ class DecoderGUI:
 
     def _build_cond_tab(self, f):
         f.columnconfigure(1, weight=1)
-        self._pe_var    = tk.BooleanVar(value=True)
+        # Defaults OFF, matching the encoder's safe defaults. These MUST match
+        # whatever the encoder used or the stream won't decode.
+        self._cp_var    = tk.BooleanVar(value=False)
+        self._pe_var    = tk.BooleanVar(value=False)
         self._rs_var    = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f, text='De-emphasis', variable=self._pe_var).grid(
+        ttk.Checkbutton(f, text='Constant-power carrier strip',
+                        variable=self._cp_var).grid(
             row=0, column=0, columnspan=2, sticky='w')
-        self._pe_alpha  = self._se(f, 'Alpha',           1, 0.5, 0.99, 0.85, 0.01, '')
+        self._cp_hz     = self._se(f, 'CP carrier Hz',  1, 50,  800, 300, 10, 'Hz')
+        ttk.Checkbutton(f, text='De-emphasis', variable=self._pe_var).grid(
+            row=2, column=0, columnspan=2, sticky='w')
+        self._pe_alpha  = self._se(f, 'Alpha',           3, 0.5, 0.99, 0.85, 0.01, '')
         ttk.Checkbutton(f, text='Reed-Solomon' + ('' if HAS_RS else ' [not installed]'),
                         variable=self._rs_var,
                         state='normal' if HAS_RS else 'disabled').grid(
-            row=2, column=0, columnspan=2, sticky='w')
-        self._rs_nsym   = self._se(f, 'RS parity syms', 3,  4,  64,  16,  2, 'bytes')
-        self._blk_size  = self._se(f, 'Block payload',  4, 32, 1024, 256, 32, 'bytes')
-        self._cp_hz     = self._se(f, 'CP carrier Hz',  5, 50,  800, 300, 10, 'Hz')
-        self._paus_thr  = self._se(f, 'Pause threshold',6, 0.001, 0.1, 0.008, 0.001, 'RMS')
-        self._paus_time = self._se(f, 'Pause timeout',  7, 0.05, 2.0, 0.30, 0.05, 's')
+            row=4, column=0, columnspan=2, sticky='w')
+        self._rs_nsym   = self._se(f, 'RS parity syms', 5,  4,  64,  16,  2, 'bytes')
+        self._blk_size  = self._se(f, 'Block payload',  6, 32, 1024, 256, 32, 'bytes')
+        self._paus_thr  = self._se(f, 'Pause threshold',7, 0.001, 0.1, 0.008, 0.001, 'RMS')
+        self._paus_time = self._se(f, 'Pause timeout',  8, 0.05, 2.0, 0.30, 0.05, 's')
 
     def _build_video_tab(self, f):
         f.columnconfigure(1, weight=1)
@@ -595,7 +602,7 @@ class DecoderGUI:
             fsk4_f1              = int(self._fsk4_f1.get()),
             fsk4_f2              = int(self._fsk4_f2.get()),
             fsk4_f3              = int(self._fsk4_f3.get()),
-            dpsk_baud            = int(self._dpsk_carr.get()),
+            dpsk_baud            = int(self._dpsk_baud.get()),
             dpsk_carrier         = int(self._dpsk_carr.get()),
             dpsk_phases          = self._dpsk_phases.get(),
             ofdm_fft_size        = int(self._ofdm_fft.get()),
@@ -604,6 +611,7 @@ class DecoderGUI:
             ofdm_f_max           = int(self._ofdm_fmax.get()),
             ofdm_pilot_interval  = int(self._ofdm_pil.get()),
             ofdm_phases          = self._ofdm_phases.get(),
+            constant_power       = self._cp_var.get(),
             pre_emphasis         = self._pe_var.get(),
             pre_emphasis_alpha   = round(self._pe_alpha.get(), 3),
             reed_solomon         = self._rs_var.get() and HAS_RS,
@@ -650,12 +658,20 @@ class DecoderGUI:
             ms.sample_rate = wft.sample_rate
             self._audio_thread = wft
 
+        if not ffmpeg_available():
+            messagebox.showwarning('ffmpeg not found',
+                                   FFMPEG_INSTALL_HELP +
+                                   '\n\nDecoding will run, but no video can be shown.')
+
         self._decoder_state = DecoderState(ms)
         self._decoder_state.PAUSE_THRESHOLD = float(self._paus_thr.get())
         self._decoder_state.PAUSE_TIMEOUT   = float(self._paus_time.get())
 
-        self._video_recon = VideoReconstructor(vset)
-        self._video_recon.start()
+        # VideoReconstructor is created lazily once we know the resolution:
+        # from the metadata block if present, else these UI fallbacks.
+        self._fallback_vset = vset
+        self._video_recon = None
+        self._detected_meta = ''
 
         self._running = True
         self._last_frame: Optional[object] = None
@@ -676,10 +692,34 @@ class DecoderGUI:
                 continue
             blocks = self._decoder_state.feed_audio(chunk)
             for seq, payload in blocks:
+                if seq == METADATA_SEQ:
+                    self._handle_metadata(payload)
+                    continue
+                if self._video_recon is None:
+                    self._ensure_recon(self._fallback_vset)
                 self._video_recon.feed_block(seq, payload)
 
         # Signal thread finished
         self._running = False
+
+    def _handle_metadata(self, payload: bytes):
+        """Parse the metadata block and start the reconstructor at the encoded
+        resolution, so the decoder doesn't depend on the UI matching the source."""
+        meta = decode_metadata_payload(payload)
+        if not meta:
+            return
+        v = meta.get('video', {})
+        vset = dict(width=int(v.get('width', self._fallback_vset['width'])),
+                    height=int(v.get('height', self._fallback_vset['height'])))
+        self._detected_meta = (
+            f"detected {vset['width']}x{vset['height']}"
+            f"@{v.get('fps','?')}fps {v.get('codec','?')}")
+        if self._video_recon is None:
+            self._ensure_recon(vset)
+
+    def _ensure_recon(self, vset: dict):
+        self._video_recon = VideoReconstructor(vset)
+        self._video_recon.start()
 
     def _stop(self):
         self._running = False
@@ -696,29 +736,33 @@ class DecoderGUI:
 
     def _poll_display(self):
         """Called by tkinter every ~33 ms to update the video canvas."""
-        if self._running and self._video_recon:
+        if self._running:
             # Drain available frames; show latest
             latest = None
-            try:
-                while True:
-                    latest = self._video_recon.frame_queue.get_nowait()
-            except queue.Empty:
-                pass
+            if self._video_recon is not None:
+                try:
+                    while True:
+                        latest = self._video_recon.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
 
             if latest is not None:
                 self._last_frame = latest
 
-            if self._last_frame is not None:
-                if HAS_PIL:
-                    img = self._last_frame
-                    if self._decoder_state.is_paused:
-                        img = self._overlay_paused(img)
-                        self._state_var.set('⏸ PAUSED (no signal)')
-                    else:
-                        self._state_var.set('▶ PLAYING')
-                    self._show_pil(img)
+            if self._last_frame is not None and HAS_PIL:
+                img = self._last_frame
+                if self._decoder_state.is_paused:
+                    img = self._overlay_paused(img)
+                    self._state_var.set('⏸ PAUSED (no signal)')
+                else:
+                    self._state_var.set('▶ PLAYING')
+                self._show_pil(img)
+            elif self._video_recon is None:
+                # Audio is being decoded but no block/resolution yet (e.g. OFDM
+                # still acquiring symbol lock).
+                self._state_var.set('● ACQUIRING…')
 
-            # Update signal level
+            # Update signal level (works during the lock phase too)
             try:
                 chunk = self._audio_thread.chunk_queue.queue[-1]
                 rms   = float(np.sqrt(np.mean(chunk ** 2)))
@@ -727,12 +771,13 @@ class DecoderGUI:
                 pass
 
             # Update stats
-            if self._video_recon:
-                st = self._video_recon.stats
-                self._stat_var.set(
-                    f"Blocks rx: {st['blocks_rx']:,}  │  "
-                    f"Lost: {st['blocks_lost']}  │  "
-                    f"Frames decoded: {st['frames']:,}")
+            st = self._video_recon.stats if self._video_recon else {
+                'blocks_rx': 0, 'blocks_lost': 0, 'frames': 0}
+            meta = f"  │  {self._detected_meta}" if self._detected_meta else ''
+            self._stat_var.set(
+                f"Blocks rx: {st['blocks_rx']:,}  │  "
+                f"Lost: {st['blocks_lost']}  │  "
+                f"Frames decoded: {st['frames']:,}{meta}")
 
         self.root.after(33, self._poll_display)   # ~30 fps update rate
 
@@ -767,6 +812,7 @@ class DecoderGUI:
         self._ofdm_fft.set(ms.ofdm_fft_size); self._ofdm_cp.set(ms.ofdm_cp_size)
         self._ofdm_fmin.set(ms.ofdm_f_min); self._ofdm_fmax.set(ms.ofdm_f_max)
         self._ofdm_pil.set(ms.ofdm_pilot_interval); self._ofdm_phases.set(ms.ofdm_phases)
+        self._cp_var.set(ms.constant_power)
         self._pe_var.set(ms.pre_emphasis); self._pe_alpha.set(ms.pre_emphasis_alpha)
         self._rs_var.set(ms.reed_solomon); self._rs_nsym.set(ms.rs_nsym)
         self._blk_size.set(ms.block_data_size); self._cp_hz.set(ms.constant_power_carrier_hz)
