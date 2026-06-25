@@ -180,7 +180,9 @@ is code-reviewed only.
 
 ## Quick start
 
+(The Python reference now lives in `python/`.)
 ```
+cd python
 pip install -r requirements.txt      # numpy, scipy, sounddevice, Pillow, reedsolo, crcmod
 # plus ffmpeg on PATH (brew/apt/winget install ffmpeg)
 

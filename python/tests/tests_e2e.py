@@ -1,11 +1,11 @@
-import sys, os, wave
+import sys, os, wave, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from cassette_modem import (ModemSettings, DecoderState, decode_metadata_payload, METADATA_SEQ,
                             modulate, frame_block, generate_preamble, add_constant_power_carrier,
                             encode_metadata_block, TRAIN_BYTES)
 
-OUT = "/private/tmp/claude-501/-Users-arthurthiele/e991caab-3fb8-4008-9690-8f783c8395e3/scratchpad/_t.wav"
+OUT = os.path.join(tempfile.gettempdir(), "cassette_e2e_test.wav")
 
 def encode_to_wav(video_bytes, output_path, ms, vset=None, progress_cb=None):
     """Mirror of cassette_encoder.encode_to_wav (modem-only, no tkinter)."""
