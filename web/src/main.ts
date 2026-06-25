@@ -88,8 +88,27 @@ function encodeView() {
     return el("div", { className: "row" }, [el("label", { textContent: label }), i]);
   };
 
+  const heightInput = el("input", { type: "number", value: String(video.height), step: "8" }) as HTMLInputElement;
+  heightInput.style.width = "90px";
+  heightInput.oninput = () => { video.height = parseFloat(heightInput.value) || 0; updateBudget(); };
+
   const fileIn = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
-  fileIn.onchange = () => { videoFile = fileIn.files?.[0] ?? null; };
+  fileIn.onchange = () => {
+    videoFile = fileIn.files?.[0] ?? null;
+    if (!videoFile) return;
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.onloadedmetadata = () => {
+      if (probe.videoWidth && probe.videoHeight) {
+        // match the source's aspect ratio (rounded to a multiple of 8)
+        video.height = Math.max(8, Math.round((video.width * probe.videoHeight) / probe.videoWidth / 8) * 8);
+        heightInput.value = String(video.height);
+        updateBudget();
+      }
+      URL.revokeObjectURL(probe.src);
+    };
+    probe.src = URL.createObjectURL(videoFile);
+  };
   const codecSel = el("select") as HTMLSelectElement;
   for (const label of Object.keys(CODECS)) codecSel.append(el("option", { value: label, textContent: label, selected: video.codec === CODECS[label] }));
   codecSel.onchange = () => { video.codec = CODECS[codecSel.value]; };
@@ -141,7 +160,7 @@ function encodeView() {
       el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn]),
       el("div", { className: "row" }, [el("label", { textContent: "Codec" }), codecSel]),
       num("Width", video.width, (v) => (video.width = v), 16),
-      num("Height", video.height, (v) => (video.height = v), 8),
+      el("div", { className: "row" }, [el("label", { textContent: "Height (auto from source)" }), heightInput]),
       num("Frame rate", video.fps, (v) => (video.fps = v)),
       num("Keyframe interval (s)", video.gopSeconds, (v) => (video.gopSeconds = v)),
     ]),
@@ -153,85 +172,84 @@ function encodeView() {
 }
 
 // ── DECODE ──────────────────────────────────────────────────────────────
-let decodeRaf = 0; // cancelled on re-render
+let decodeProfileIdx = 1; // module-level so re-renders don't reset the selection
+let decodeRaf = 0;
 
 function decodeView() {
   cancelAnimationFrame(decodeRaf);
   const s: ModemSettings = { ...DEFAULT_SETTINGS };
-  let profileIdx = 1;
-  Object.assign(s, PROFILES[profileIdx].settings);
-  let source: "file" | "live" = "file";
+  Object.assign(s, PROFILES[decodeProfileIdx].settings);
+  let sourceMode: "file" | "live" = "file";
   let deviceId: string | undefined;
 
-  const canvas = el("canvas", { id: "screen", width: 256, height: 144 }) as HTMLCanvasElement;
+  const canvas = el("canvas", { id: "screen", width: 160, height: 120 }) as HTMLCanvasElement;
   const ctx2d = canvas.getContext("2d")!;
   const canvasHolder = el("div", { className: "panel" }, [canvas]);
   const stats = el("div", { className: "mono muted", textContent: "Load an audio file (or pick a device)." });
   const warn = el("div", { className: "muted" });
 
-  // FILE: decode the whole clip up front (reliable), then play it back paced by
-  // the muted audio element — which gives play/pause/seek-to-any-point for free.
-  let frames: { ts: number; frame: VideoFrame }[] = [];
-  let lastFile: File | null = null;
-  function clearFrames() { for (const { frame } of frames) frame.close(); frames = []; }
-
-  async function decodeFile(file: File) {
-    clearFrames();
-    warn.textContent = "";
-    stats.textContent = "decoding…";
-    const buf = await file.arrayBuffer();
-    const { samples, sampleRate } = decodeWav(buf);
+  // ── decode pipeline (rebuilt on load / seek / settings change) ──
+  let ds: DecoderState | null = null;
+  let parser = new ContainerParser();
+  let vdec: StreamVideoDecoder | null = null;
+  let blocks = 0;
+  const frameQueue: VideoFrame[] = [];
+  function buildPipeline(sampleRate: number) {
     s.sampleRate = sampleRate;
-    const ds = new DecoderState(s);
-    const parser = new ContainerParser();
-    let bl = 0;
-    const vdec = new StreamVideoDecoder((f) => frames.push({ ts: f.timestamp, frame: f }), () => {});
-    for (let i = 0; i < samples.length; i += 4096) {
-      for (const b of ds.feedAudio(samples.subarray(i, i + 4096))) {
-        if (b.seq !== METADATA_SEQ) { bl++; vdec.pushRecords(parser.push(b.payload)); }
-      }
-      if (i % (4096 * 40) === 0) { stats.textContent = `decoding… ${((100 * i) / samples.length) | 0}%`; await new Promise((r) => setTimeout(r, 0)); }
-    }
-    await vdec.flush();
-    frames.sort((a, b) => a.ts - b.ts);
-    if (bl === 0) warn.textContent = "⚠ No data decoded — the profile/settings must match the encoder (or Load its .cassette config).";
-    else if (frames.length === 0) warn.textContent = "⚠ Data decoded but no video frames — codec mismatch.";
-    stats.textContent = `${frames.length} frames from ${bl} blocks` + (frames.length ? " — press play, or seek anywhere" : "");
-    audioEl.src = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
-    audioEl.muted = true; // it's the clock, not for listening (the signal is modem screech)
-    audioEl.style.display = "";
-    if (frames.length) { canvas.width = frames[0].frame.displayWidth; canvas.height = frames[0].frame.displayHeight; ctx2d.drawImage(frames[0].frame, 0, 0); }
+    ds = new DecoderState(s);
+    parser = new ContainerParser();
+    if (vdec) vdec.close();
+    vdec = new StreamVideoDecoder((f) => { if (frameQueue.length < 6) frameQueue.push(f); else f.close(); }, () => {});
+    blocks = 0;
+    while (frameQueue.length) frameQueue.shift()!.close();
+  }
+  function handle(seq: number, payload: Uint8Array) {
+    if (seq === METADATA_SEQ) return; // frame size comes from the frame itself
+    blocks++;
+    vdec!.pushRecords(parser.push(payload));
   }
 
-  // LIVE: realtime capture → decode → draw frames as they arrive.
-  let liveCap: Capture | null = null;
-  const liveQueue: VideoFrame[] = [];
-  let liveBlocks = 0;
+  // ── FILE: a self-paced transport (own play/pause/seek clock) drives real-time
+  // decoding of the in-memory samples — no autoplay gate, no capture loss. ──
+  let samples: Float32Array | null = null;
+  let fileRate = 44100;
+  let playhead = 0;   // sample position of the play clock
+  let fed = 0;        // samples fed to the decoder so far
+  let playing = false;
+  let lastTick = 0;
 
-  function drawLoop() {
-    if (source === "file" && frames.length) {
-      const t = audioEl.currentTime * 1e6;
-      let idx = 0;
-      for (let i = 0; i < frames.length; i++) { if (frames[i].ts <= t) idx = i; else break; }
-      const fr = frames[idx].frame;
-      if (canvas.width !== fr.displayWidth) canvas.width = fr.displayWidth;
-      if (canvas.height !== fr.displayHeight) canvas.height = fr.displayHeight;
-      ctx2d.drawImage(fr, 0, 0);
-    } else if (source === "live") {
-      const f = liveQueue.shift();
-      if (f) { canvas.width = f.displayWidth; canvas.height = f.displayHeight; ctx2d.drawImage(f, 0, 0); f.close(); }
-    }
-    decodeRaf = requestAnimationFrame(drawLoop);
-  }
-  decodeRaf = requestAnimationFrame(drawLoop);
+  const playBtn = el("button", { textContent: "▶ Play" }) as HTMLButtonElement;
+  const seek = el("input", { type: "range", min: "0", max: "1000", value: "0" }) as HTMLInputElement;
+  seek.style.flex = "1";
+  const timeLabel = el("span", { className: "mono muted", textContent: "0.0s" });
+  const transport = el("div", { className: "row" }, [playBtn, seek, timeLabel]);
+  transport.style.display = "none";
 
-  // ── file player ──
-  const audioEl = el("audio", { controls: true }) as HTMLAudioElement;
-  audioEl.style.cssText = "width:100%;max-width:512px;display:none";
+  function reseek(pos: number) { buildPipeline(fileRate); playhead = pos; fed = pos; while (frameQueue.length) frameQueue.shift()!.close(); }
+  playBtn.onclick = () => {
+    if (!samples) return;
+    playing = !playing;
+    playBtn.textContent = playing ? "❚❚ Pause" : "▶ Play";
+    lastTick = performance.now();
+    if (playing && playhead >= samples.length) reseek(0); // replay from start
+  };
+  seek.oninput = () => { if (samples) reseek(Math.floor((parseInt(seek.value) / 1000) * samples.length)); };
+
   const fileIn = el("input", { type: "file", accept: "audio/wav,.wav" }) as HTMLInputElement;
-  fileIn.onchange = () => { const f = fileIn.files?.[0]; if (f) { lastFile = f; decodeFile(f).catch((e) => (warn.textContent = "Error: " + (e as Error).message)); } };
+  fileIn.onchange = async () => {
+    const f = fileIn.files?.[0];
+    if (!f) return;
+    warn.textContent = "";
+    const dec = decodeWav(await f.arrayBuffer());
+    samples = dec.samples; fileRate = dec.sampleRate;
+    reseek(0); playing = false; playBtn.textContent = "▶ Play";
+    transport.style.display = "";
+    stats.textContent = `loaded ${(samples.length / fileRate).toFixed(1)}s — press play (or scrub to start anywhere)`;
+  };
 
-  // ── live device controls ──
+  // ── LIVE: realtime capture ──
+  let liveCap: Capture | null = null;
+  let liveOn = false;
   const deviceSel = el("select") as HTMLSelectElement;
   const refreshDevices = async () => {
     deviceSel.innerHTML = "";
@@ -247,44 +265,63 @@ function decodeView() {
   const liveStop = el("button", { className: "secondary", textContent: "■ Stop" }) as HTMLButtonElement;
   liveStart.onclick = async () => {
     liveCap?.stop();
-    liveQueue.length = 0; liveBlocks = 0;
-    const cap = new Capture();
-    liveCap = cap;
-    try {
-      await cap.start(deviceId, (() => {
-        const ds = new DecoderState({ ...s, sampleRate: cap.sampleRate });
-        const parser = new ContainerParser();
-        const vdec = new StreamVideoDecoder((f) => { if (liveQueue.length < 8) liveQueue.push(f); else f.close(); }, () => {});
-        return (samples: Float32Array) => { for (const b of ds.feedAudio(samples)) if (b.seq !== METADATA_SEQ) { liveBlocks++; vdec.pushRecords(parser.push(b.payload)); stats.textContent = `live · blocks: ${liveBlocks}`; } };
-      })());
-    } catch (e) { liveCap = null; warn.textContent = "Input error: " + (e as Error).message; }
+    const cap = new Capture(); liveCap = cap; liveOn = true;
+    try { await cap.start(deviceId, (() => { buildPipeline(cap.sampleRate); return (smp: Float32Array) => { for (const b of ds!.feedAudio(smp)) handle(b.seq, b.payload); }; })()); }
+    catch (e) { liveCap = null; liveOn = false; warn.textContent = "Input error: " + (e as Error).message; }
   };
-  liveStop.onclick = () => { liveCap?.stop(); liveCap = null; };
+  liveStop.onclick = () => { liveCap?.stop(); liveCap = null; liveOn = false; };
+  function stopAll() { liveCap?.stop(); liveCap = null; liveOn = false; playing = false; }
 
-  function stopAll() { liveCap?.stop(); liveCap = null; }
+  // ── loop: advance the clock + feed (file), then draw the newest frame ──
+  function loop() {
+    if (sourceMode === "file" && samples && ds) {
+      if (playing) {
+        const now = performance.now();
+        playhead = Math.min(samples.length, playhead + ((now - lastTick) / 1000) * fileRate);
+        lastTick = now;
+        if (playhead >= samples.length) { playing = false; playBtn.textContent = "▶ Play"; }
+      }
+      let budget = Math.floor(fileRate * 0.5);
+      const target = Math.floor(playhead);
+      while (fed < target && budget > 0) {
+        const end = Math.min(fed + 4096, target);
+        for (const b of ds.feedAudio(samples.subarray(fed, end))) handle(b.seq, b.payload);
+        budget -= end - fed;
+        fed = end;
+      }
+      seek.value = String(Math.floor((playhead / samples.length) * 1000));
+      timeLabel.textContent = `${(playhead / fileRate).toFixed(1)}s`;
+    }
+    while (frameQueue.length > 1) frameQueue.shift()!.close();
+    const f = frameQueue.shift();
+    if (f) { if (canvas.width !== f.displayWidth) canvas.width = f.displayWidth; if (canvas.height !== f.displayHeight) canvas.height = f.displayHeight; ctx2d.drawImage(f, 0, 0); f.close(); }
+    const active = (sourceMode === "file" && playing) || liveOn;
+    stats.textContent = `blocks: ${blocks}` + (active && blocks === 0 && fed > fileRate ? "  ·  no data — check the profile/settings match the encoder" : "");
+    decodeRaf = requestAnimationFrame(loop);
+  }
+  decodeRaf = requestAnimationFrame(loop);
 
+  // ── source toggle + profile + config ──
   const srcRow = el("div", { className: "row" });
   const liveRow = el("div", { className: "row" }, [deviceSel, liveStart, liveStop]);
   const drawSrc = () => {
     srcRow.innerHTML = "";
     srcRow.append(el("label", { textContent: "Source" }));
     for (const m of ["file", "live"] as const) {
-      const b = el("button", { className: "secondary" + (source === m ? " active" : ""), textContent: m === "file" ? "Audio file" : "Audio device" });
-      b.onclick = async () => { stopAll(); source = m; if (m === "live") await refreshDevices(); drawSrc(); };
+      const b = el("button", { className: "secondary" + (sourceMode === m ? " active" : ""), textContent: m === "file" ? "Audio file" : "Audio device" });
+      b.onclick = async () => { stopAll(); sourceMode = m; if (m === "live") await refreshDevices(); drawSrc(); };
       srcRow.append(b);
     }
-    srcRow.append(source === "file" ? fileIn : el("span"));
-    liveRow.style.display = source === "live" ? "" : "none";
-    audioEl.style.display = source === "file" && frames.length ? "" : "none";
+    srcRow.append(sourceMode === "file" ? fileIn : el("span"));
+    liveRow.style.display = sourceMode === "live" ? "" : "none";
+    transport.style.display = sourceMode === "file" && samples ? "" : "none";
   };
   drawSrc();
 
-  // ── profile + config ──
   const profileSel = el("select") as HTMLSelectElement;
-  PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === profileIdx })));
-  profileSel.onchange = () => { profileIdx = parseInt(profileSel.value); Object.assign(s, PROFILES[profileIdx].settings); if (lastFile) decodeFile(lastFile); render(); };
-
-  const reDecode = () => { if (source === "file" && lastFile) decodeFile(lastFile); }; // apply settings changes
+  PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === decodeProfileIdx })));
+  profileSel.onchange = () => { decodeProfileIdx = parseInt(profileSel.value); Object.assign(s, PROFILES[decodeProfileIdx].settings); if (samples) reseek(0); render(); };
+  const reapply = () => { if (samples) reseek(Math.floor(playhead)); };
 
   const popBtn = el("button", { className: "secondary", textContent: "⧉ Pop out" });
   popBtn.onclick = async () => {
@@ -296,14 +333,14 @@ function decodeView() {
     win.addEventListener("pagehide", () => canvasHolder.append(canvas));
   };
 
-  const panel = settingsPanel(s, reDecode, { hideSampleRate: true });
+  const panel = settingsPanel(s, reapply, { hideSampleRate: true });
   app.append(
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(s, () => {}, () => render())]),
       srcRow,
-      audioEl,
+      transport,
       liveRow,
-      el("p", { className: "muted", textContent: "Pick the profile (or Load the .cassette config) that matches the encoder, then choose the WAV. It decodes, then plays back with seek — start anywhere. Changing settings re-decodes." }),
+      el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
       panel,
     ]),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn]), stats, warn]),
