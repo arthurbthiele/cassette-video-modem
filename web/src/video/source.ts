@@ -32,8 +32,18 @@ export async function framesFromFile(file: File, opts: FrameSourceOptions): Prom
   // Seek-and-grab: deterministic and avoids realtime-playback timing jitter.
   for (let t = 0, i = 0; t < dur; t += dt, i++) {
     await seek(video, t);
-    if (opts.grayscale) ctx.filter = "grayscale(1)"; else ctx.filter = "none";
     ctx.drawImage(video, 0, 0, opts.width, opts.height);
+    // Grayscale by hand, not via ctx.filter — Canvas filter is unsupported on
+    // iOS/mobile Safari, where it silently no-ops and colour leaks through.
+    if (opts.grayscale) {
+      const img = ctx.getImageData(0, 0, opts.width, opts.height);
+      const d = img.data;
+      for (let p = 0; p < d.length; p += 4) {
+        const y = (d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114) | 0;
+        d[p] = d[p + 1] = d[p + 2] = y;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
     frames.push(new VideoFrame(canvas, { timestamp: Math.round(i * dt * 1e6) }));
     opts.onProgress?.(Math.min(1, t / dur));
   }
