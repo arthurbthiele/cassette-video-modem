@@ -14,6 +14,7 @@ import { encodeWav, decodeWav } from "./audio/wav";
 import { simulateChannel, ChannelOptions } from "./dsp/channel";
 import { pilotResample } from "./dsp/pilot";
 import { PROFILES, applyProfile } from "./profiles";
+import { modulateOfdm as ofdmMod, demodulateOfdm as ofdmDemod, OfdmStreamDemod } from "./dsp/ofdm";
 
 const out = document.getElementById("out")!;
 const CODEC = "av01.0.01M.08";
@@ -95,8 +96,49 @@ function tachoDataTest(method: "fsk" | "dpsk", pilotHz: number) {
   return { expected, noTacho: blocksOf(wow), withTacho: blocksOf(pilotResample(wow, s.sampleRate, s.pilotHz)) };
 }
 
+// Isolate the tracker from the preamble/lock: feed pure OFDM (starts on a symbol
+// boundary) and compare its bits to the known-good one-shot demodulator.
+function ofdmTrackerUnitTest() {
+  const p = { sampleRate: 44100, fftSize: 512, cpSize: 64, fMin: 500, fMax: 6000, pilotInterval: 8, phases: 4 };
+  const data = new Uint8Array(1000);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 37) % 256;
+  const audio = ofdmMod(data, p);
+  const refBits = ofdmDemod(audio, p);
+  const dm = new OfdmStreamDemod(p);
+  const trk: number[] = [];
+  for (let i = 0; i < audio.length; i += 4096) for (const b of dm.push(Float64Array.from(audio.subarray(i, i + 4096)))) trk.push(b);
+  const n = Math.min(refBits.length, trk.length);
+  let match = 0;
+  for (let i = 0; i < n; i++) if (refBits[i] === trk[i]) match++;
+  return { locked: (dm as any).locked, pos: (dm as any).pos, refBits: refBits.length, trkBits: trk.length, matchPct: n ? +(100 * match / n).toFixed(1) : 0 };
+}
+
+// OFDM through escalating wow/flutter — the per-symbol-timing frontier. No pilot;
+// this isolates whether the decoder's symbol timing survives a wobbling tape.
+function ofdmWowSweep(depths: number[]) {
+  const s = { ...DEFAULT_SETTINGS, method: "ofdm" as const, reedSolomon: true, rsNsym: 16 };
+  const data = new Uint8Array(4000);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 37) % 256;
+  const audio = Float32Array.from(encodeStream(data, s));
+  const expected = Math.ceil(data.length / s.blockDataSize);
+  const blocksOf = (smp: Float32Array) => {
+    const ds = new DecoderState(s);
+    let bl = 0;
+    for (let i = 0; i < smp.length; i += 4096) for (const b of ds.feedAudio(smp.subarray(i, i + 4096))) if (b.seq !== METADATA_SEQ) bl++;
+    return bl;
+  };
+  const res: Record<string, string> = { expected: String(expected), clean: `${blocksOf(audio)}/${expected}` };
+  for (const d of depths) {
+    const wow = simulateChannel(audio, { sampleRate: s.sampleRate, wowDepth: d, flutterDepth: d / 2, snrDb: 45 });
+    res[`wow ${d}`] = `${blocksOf(wow)}/${expected}`;
+  }
+  return res;
+}
+
 (async () => {
   const results: Record<string, any> = {};
+  try { results["_ofdm tracker unit"] = ofdmTrackerUnitTest(); } catch (e) { results["_ofdm tracker unit"] = { error: String(e) }; }
+  try { results["_ofdm wow sweep"] = ofdmWowSweep([0.0005, 0.001, 0.002, 0.003, 0.005]); } catch (e) { results["_ofdm wow sweep"] = { error: String(e) }; }
   for (const p of PROFILES) {
     out.textContent = `running ${p.name}…`;
     try { results[p.name] = await runProfile(p.name, p.settings, p.video); }

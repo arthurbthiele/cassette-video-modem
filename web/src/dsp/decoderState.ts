@@ -6,9 +6,9 @@
 import { ModemSettings } from "./settings";
 import { bytesToBits, bitsToBytes } from "./bits";
 import { SYNC_MAGIC, deframeBlock, blockWireSize } from "./framing";
-import { demodulateRaw, carrierStripCut, ofdmTimingOffset } from "./modem";
+import { demodulateRaw, carrierStripCut } from "./modem";
 import { butter, lfilter } from "./filters";
-import { ofdmCarriers } from "./ofdm";
+import { ofdmCarriers, OfdmStreamDemod } from "./ofdm";
 
 const SYNC_BITS = bytesToBits(SYNC_MAGIC); // 32 bits
 
@@ -30,7 +30,7 @@ export class DecoderState {
   private seen = new Set<number>();
   private sps: number;
   private bitsPerBlock: number;
-  private locked: boolean;
+  private ofdmDemod: OfdmStreamDemod | null = null;
 
   // filter state (carried across chunks)
   private hp: { b: number[]; a: number[]; zi: number[] } | null = null;
@@ -40,7 +40,7 @@ export class DecoderState {
     this.s = s;
     this.sps = this.calcSps();
     this.bitsPerBlock = this.calcBitsPerBlock();
-    this.locked = s.method !== "ofdm";
+    if (s.method === "ofdm") this.ofdmDemod = new OfdmStreamDemod(ofdmParams(s));
     if (s.constantPower) {
       const cut = Math.min(0.95, carrierStripCut(s));
       if (cut > 0.002) {
@@ -83,16 +83,14 @@ export class DecoderState {
     if (rms > this.pauseThreshold) { this.lastSig = now; this.isPaused = false; }
     else if (now - this.lastSig > this.pauseTimeout) { this.isPaused = true; return []; }
 
-    let neu = concat(this.partial, Float64Array.from(chunk));
-
-    if (!this.locked) {
-      if (neu.length < 4 * this.sps) { this.partial = neu; return []; }
-      const offset = ofdmTimingOffset(neu, this.s);
-      if (offset === null) { this.partial = neu; return []; }
-      neu = neu.subarray(offset);
-      this.locked = true;
+    // OFDM: per-symbol timing-tracking demodulator (survives wow/flutter)
+    if (this.ofdmDemod) {
+      const proc = this.preprocess(Float64Array.from(chunk));
+      for (const b of this.ofdmDemod.push(proc)) this.bits.push(b);
+      return this.extractBlocks();
     }
 
+    const neu = concat(this.partial, Float64Array.from(chunk));
     const nc = Math.floor(neu.length / this.sps) * this.sps;
     this.partial = neu.slice(nc);
     if (nc === 0) return [];
