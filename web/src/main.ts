@@ -121,6 +121,7 @@ function encodeView() {
 
   encodeBtn.onclick = async () => {
     if (!videoFile) { log.textContent = "Choose a video file first."; return; }
+    if (video.width < 96 || video.height < 64) { log.textContent = "Resolution too small to decode reliably — use at least 96×64 (the video codec has a minimum)."; return; }
     encodeBtn.disabled = true;
     result.innerHTML = "";
     audioEl.style.display = "none";

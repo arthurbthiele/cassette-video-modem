@@ -1,6 +1,10 @@
 // Device-quality presets — "realistic, slightly conservative" defaults for a
-// range of media, so a user can pick their target and get sane settings instead
-// of tuning a dozen knobs. (skamlox's request.)
+// range of media, each sized so the video fits the channel in real time.
+//
+// Note on physics: a 6 kHz cassette band caps 2-tone FSK at ~1–2 kbps, below
+// any video codec's floor — so FSK can't carry real-time video and isn't a
+// profile (it's still available in manual settings for data/experiments). OFDM
+// (~7 kbps) and DPSK carry video; the lower the channel, the smaller the frame.
 
 import { ModemSettings } from "./dsp/settings";
 
@@ -14,33 +18,33 @@ export interface DeviceProfile {
 export const PROFILES: DeviceProfile[] = [
   {
     name: "Clean line / CD / PC audio",
-    description: "A clean digital channel (line-in/out, CD, soundcard). High-bitrate OFDM, light error correction, the biggest picture that still fits in real time.",
+    description: "A clean digital channel (line-in/out, CD, soundcard). Highest-bitrate OFDM (8-phase), the biggest picture.",
     settings: { method: "ofdm", ofdmFMin: 300, ofdmFMax: 6000, ofdmPhases: 8, reedSolomon: true, rsNsym: 8, constantPower: false },
-    video: { width: 160, height: 120, fps: 10 },
+    video: { width: 160, height: 120, fps: 12 },
   },
   {
     name: "Good cassette / tape deck",
-    description: "A decent deck and tape with light wow/flutter. OFDM within the usable band, moderate error correction.",
+    description: "A decent deck and tape with light wow/flutter. OFDM in the usable band, moderate error correction.",
     settings: { method: "ofdm", ofdmFMin: 500, ofdmFMax: 6000, ofdmPhases: 4, reedSolomon: true, rsNsym: 16, constantPower: false },
     video: { width: 128, height: 96, fps: 8 },
   },
   {
-    name: "Cheap cassette deck (AGC)",
-    description: "A cheap deck with automatic gain control. Differential PSK + a constant-power carrier so the AGC stops hunting; strong error correction. Low bitrate → small picture.",
-    settings: { method: "dpsk", dpskCarrier: 2400, dpskPhases: 4, constantPower: true, reedSolomon: true, rsNsym: 24 },
-    video: { width: 96, height: 64, fps: 5 },
-  },
-  {
-    name: "Hostile / very cheap deck",
-    description: "Worst case: weak, noisy, AGC. The most robust mode — 2-tone FSK + constant-power carrier + heavy error correction. Tiny picture.",
-    settings: { method: "fsk", fskBaud: 1200, constantPower: true, reedSolomon: true, rsNsym: 32 },
-    video: { width: 64, height: 48, fps: 3 },
-  },
-  {
     name: "Telephone line (narrow)",
     description: "A narrow ~500–3400 Hz voice channel. OFDM squeezed into the band.",
-    settings: { method: "ofdm", ofdmFMin: 500, ofdmFMax: 3400, reedSolomon: true, rsNsym: 16, constantPower: false },
-    video: { width: 96, height: 64, fps: 6 },
+    settings: { method: "ofdm", ofdmFMin: 500, ofdmFMax: 3400, ofdmPhases: 4, reedSolomon: true, rsNsym: 16, constantPower: false },
+    video: { width: 96, height: 72, fps: 6 },
+  },
+  {
+    name: "Cheap cassette deck (AGC)",
+    description: "A cheap deck with automatic gain control. 8-phase DPSK + a constant-power carrier so the AGC stops hunting.",
+    settings: { method: "dpsk", dpskBaud: 1800, dpskCarrier: 2600, dpskPhases: 8, constantPower: true, reedSolomon: true, rsNsym: 16 },
+    video: { width: 96, height: 72, fps: 6 },
+  },
+  {
+    name: "Robust (noisy / AGC)",
+    description: "Worst usable case: noisy, AGC. 4-phase DPSK + constant-power carrier + heavy error correction. Tiny picture, most reliable.",
+    settings: { method: "dpsk", dpskBaud: 2400, dpskCarrier: 2400, dpskPhases: 4, constantPower: true, reedSolomon: true, rsNsym: 24 },
+    video: { width: 96, height: 64, fps: 5 },
   },
 ];
 
