@@ -379,7 +379,7 @@ function decodeView() {
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(s, () => {}, () => render())]),
       srcRow,
-      el("div", { className: "row" }, [sampleTapeBtn, el("span", { className: "muted", textContent: "one-click demo — loads a bundled tape and plays it" })]),
+      el("div", { className: "row" }, [sampleTapeBtn, el("span", { className: "muted", textContent: "one-click demo — the Encode tab's sample clip, already encoded to a tape, played back" })]),
       transport,
       liveRow,
       el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
