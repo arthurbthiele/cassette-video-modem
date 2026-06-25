@@ -11,6 +11,7 @@ import { encodeToFitChannel } from "./video/encoder";
 import { StreamVideoDecoder } from "./video/decoder";
 import { ContainerParser } from "./video/container";
 import { encodeWav, decodeWav } from "./audio/wav";
+import { simulateChannel, ChannelOptions } from "./dsp/channel";
 import { PROFILES, applyProfile } from "./profiles";
 
 const out = document.getElementById("out")!;
@@ -43,27 +44,35 @@ async function runProfile(name: string, settings: Partial<ModemSettings>, video:
 
   const audio = Float32Array.from(encodeStream(fit.container, s, { width: video.width, height: video.height, fps: video.fps }));
   const wav = encodeWav(audio, s.sampleRate);
-  const { samples } = decodeWav(await wav.arrayBuffer());
+  const clean = decodeWav(await wav.arrayBuffer()).samples;
 
-  // decode exactly as the UI does
-  const ds = new DecoderState(s);
-  const parser = new ContainerParser();
-  let blocks = 0, framesDecoded = 0;
-  const vdec = new StreamVideoDecoder(() => framesDecoded++, () => {});
-  for (let i = 0; i < samples.length; i += 4096)
-    for (const b of ds.feedAudio(samples.subarray(i, i + 4096)))
-      if (b.seq !== METADATA_SEQ) { blocks++; vdec.pushRecords(parser.push(b.payload)); }
-  await vdec.flush();
-  vdec.close();
+  // channel conditions to probe
+  const conditions: Record<string, ChannelOptions | null> = {
+    clean: null,
+    goodDeck: { sampleRate: s.sampleRate, bandLowHz: 200, bandHighHz: 7500, snrDb: 40, dropoutPerSec: 0.1 },
+    cheapAGC: { sampleRate: s.sampleRate, bandLowHz: 300, bandHighHz: 6500, snrDb: 26, dropoutPerSec: 0.3, agc: true },
+    wow: { sampleRate: s.sampleRate, bandLowHz: 200, bandHighHz: 7500, snrDb: 40, wowDepth: 0.0008, flutterDepth: 0.0004 },
+  };
+  const cond: Record<string, string> = {};
+  for (const [name, ch] of Object.entries(conditions)) {
+    const samples = ch ? simulateChannel(clean, ch) : clean;
+    const ds = new DecoderState(s);
+    const parser = new ContainerParser();
+    let blocks = 0, framesDecoded = 0;
+    const vdec = new StreamVideoDecoder(() => framesDecoded++, () => {});
+    for (let i = 0; i < samples.length; i += 4096)
+      for (const b of ds.feedAudio(samples.subarray(i, i + 4096)))
+        if (b.seq !== METADATA_SEQ) { blocks++; vdec.pushRecords(parser.push(b.payload)); }
+    await vdec.flush();
+    vdec.close();
+    cond[name] = `${framesDecoded}/${n}f ${blocks}b`;
+  }
 
-  const audioSecs = audio.length / s.sampleRate;
   return {
-    pass: blocks > 0 && framesDecoded > 0,
-    blocks, framesDecoded, framesIn: n,
-    fits: fit.fits, ratio: +(audioSecs / SECONDS).toFixed(2),
-    kbps: +(fit.containerBitsPerSec / 1000).toFixed(1),
-    res: `${video.width}x${video.height}@${video.fps}`,
-    method: s.method, cp: s.constantPower,
+    pass: cond.clean.startsWith(`${n}/`),
+    res: `${video.width}x${video.height}@${video.fps}`, method: s.method, cp: s.constantPower,
+    fits: fit.fits, kbps: +(fit.containerBitsPerSec / 1000).toFixed(1),
+    cond,
   };
 }
 
