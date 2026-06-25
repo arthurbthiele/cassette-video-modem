@@ -16,6 +16,7 @@ import { Capture, listInputDevices } from "./audio/capture";
 import { PROFILES, applyProfile } from "./profiles";
 import { downloadConfig, fromConfigJSON, VideoConfig } from "./dsp/config";
 import { settingsPanel } from "./ui/settings-panel";
+import { Meters } from "./ui/meters";
 import { el } from "./ui/dom";
 
 const CODECS: Record<string, string> = {
@@ -183,6 +184,9 @@ function decodeView() {
   let sourceMode: "file" | "live" = "file";
   let deviceId: string | undefined;
 
+  const meters = new Meters();
+  const metersCanvas = el("canvas", { width: 320, height: 90 }) as HTMLCanvasElement;
+  metersCanvas.style.cssText = "width:100%;max-width:512px;border:1px solid #2c3038;border-radius:6px";
   const canvas = el("canvas", { id: "screen", width: 160, height: 120 }) as HTMLCanvasElement;
   const ctx2d = canvas.getContext("2d")!;
   const canvasHolder = el("div", { className: "panel" }, [canvas]);
@@ -267,7 +271,7 @@ function decodeView() {
   liveStart.onclick = async () => {
     liveCap?.stop();
     const cap = new Capture(); liveCap = cap; liveOn = true;
-    try { await cap.start(deviceId, (() => { buildPipeline(cap.sampleRate); return (smp: Float32Array) => { for (const b of ds!.feedAudio(smp)) handle(b.seq, b.payload); }; })()); }
+    try { await cap.start(deviceId, (() => { buildPipeline(cap.sampleRate); return (smp: Float32Array) => { meters.push(smp); for (const b of ds!.feedAudio(smp)) handle(b.seq, b.payload); }; })()); }
     catch (e) { liveCap = null; liveOn = false; warn.textContent = "Input error: " + (e as Error).message; }
   };
   liveStop.onclick = () => { liveCap?.stop(); liveCap = null; liveOn = false; };
@@ -286,7 +290,9 @@ function decodeView() {
       const target = Math.floor(playhead);
       while (fed < target && budget > 0) {
         const end = Math.min(fed + 4096, target);
-        for (const b of ds.feedAudio(samples.subarray(fed, end))) handle(b.seq, b.payload);
+        const chunk = samples.subarray(fed, end);
+        meters.push(chunk);
+        for (const b of ds.feedAudio(chunk)) handle(b.seq, b.payload);
         budget -= end - fed;
         fed = end;
       }
@@ -297,6 +303,7 @@ function decodeView() {
     const f = frameQueue.shift();
     if (f) { if (canvas.width !== f.displayWidth) canvas.width = f.displayWidth; if (canvas.height !== f.displayHeight) canvas.height = f.displayHeight; ctx2d.drawImage(f, 0, 0); f.close(); }
     const active = (sourceMode === "file" && playing) || liveOn;
+    meters.draw(metersCanvas, blocks > 0);
     stats.textContent = `blocks: ${blocks}` + (active && blocks === 0 && fed > fileRate ? "  ·  no data — check the profile/settings match the encoder" : "");
     decodeRaf = requestAnimationFrame(loop);
   }
@@ -344,7 +351,7 @@ function decodeView() {
       el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
       panel,
     ]),
-    el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn]), stats, warn]),
+    el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn]), stats, warn, el("p", { className: "muted", textContent: "Signal (green = locked/decoding, amber = signal but no lock, grey = silent):" }), metersCanvas]),
     canvasHolder,
   );
 }
