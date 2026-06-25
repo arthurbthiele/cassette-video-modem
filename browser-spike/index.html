@@ -1,0 +1,140 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Browser feasibility spike — cassette video modem</title>
+<style>body{font:13px monospace;background:#111;color:#ddd;padding:1em;white-space:pre-wrap}</style>
+<h3>Cassette modem — browser feasibility spike</h3>
+<pre id="out">running…</pre>
+<script type="module">
+const out = document.getElementById('out');
+const log = (...a) => { out.textContent += '\n' + a.join(' '); };
+const R = { webcodecs:{}, codecSupport:{}, encodeDecode:{}, dsp:{}, capture:{} };
+
+// ── 1. WebCodecs presence ──────────────────────────────────────────────
+R.webcodecs = {
+  VideoEncoder: typeof VideoEncoder !== 'undefined',
+  VideoDecoder: typeof VideoDecoder !== 'undefined',
+  AudioContext: typeof AudioContext !== 'undefined',
+  AudioWorklet: typeof AudioWorklet !== 'undefined',
+};
+
+// ── 2. Codec support for low-res video ─────────────────────────────────
+async function codecSupport(){
+  const cands = {
+    'H.264 baseline':'avc1.42001E',
+    'H.265/HEVC':'hev1.1.6.L60.B0',
+    'AV1':'av01.0.01M.08',
+    'VP9':'vp09.00.10.08',
+    'VP8':'vp8',
+  };
+  for (const [name,codec] of Object.entries(cands)){
+    try{
+      const cfg = {codec, width:256, height:144};
+      const dec = await VideoDecoder.isConfigSupported(cfg);
+      let enc = null;
+      try { enc = await VideoEncoder.isConfigSupported(
+        {codec,width:256,height:144,bitrate:20000,framerate:15}); } catch(e){}
+      R.codecSupport[name] = {
+        decode: dec.supported,
+        decodeHW: dec.config?.hardwareAcceleration ?? '?',
+        encode: enc ? enc.supported : 'n/a',
+      };
+    }catch(e){ R.codecSupport[name] = {error:String(e)}; }
+  }
+}
+
+// ── 3. Encode a low-bitrate clip, then decode it & measure realtime ────
+function drawFrame(ctx, i){
+  ctx.fillStyle = `hsl(${(i*7)%360} 60% 30%)`; ctx.fillRect(0,0,256,144);
+  ctx.fillStyle='#fff'; ctx.font='30px monospace';
+  ctx.fillText('frame '+i, 10 + (i*3)%120, 80);
+}
+async function encodeDecode(codec, targetBitrate){
+  const FPS=15, N=150, W=256, H=144;           // 10 seconds of video
+  const cvs = new OffscreenCanvas(W,H); const ctx = cvs.getContext('2d');
+  const chunks=[]; let decoderConfig=null, bytes=0;
+  const enc = new VideoEncoder({
+    output:(chunk,meta)=>{ if(meta?.decoderConfig) decoderConfig=meta.decoderConfig;
+      const b=new Uint8Array(chunk.byteLength); chunk.copyTo(b);
+      chunks.push({b,type:chunk.type,ts:chunk.timestamp}); bytes+=b.byteLength; },
+    error:e=>{throw e;}
+  });
+  enc.configure({codec,width:W,height:H,bitrate:targetBitrate,framerate:FPS,
+                 latencyMode:'realtime'});
+  for(let i=0;i<N;i++){ drawFrame(ctx,i);
+    const vf=new VideoFrame(cvs,{timestamp:Math.round(i*1e6/FPS)});
+    enc.encode(vf,{keyFrame:i%150===0}); vf.close(); }
+  await enc.flush(); enc.close();
+
+  const bps = bytes / (N/FPS);                 // encoded bytes per second
+  // decode, measure wall-clock
+  let decoded=0;
+  const dec = new VideoDecoder({output:f=>{decoded++; f.close();}, error:e=>{throw e;}});
+  dec.configure(decoderConfig || {codec});
+  const t0=performance.now();
+  for(const c of chunks){
+    dec.decode(new EncodedVideoChunk({type:c.type,timestamp:c.ts,data:c.b}));
+  }
+  await dec.flush(); dec.close();
+  const secs=(performance.now()-t0)/1000;
+  return {targetBitrate, encodedBytesPerSec:Math.round(bps),
+          encodedKbps:Math.round(bps*8/1000), frames:decoded,
+          decodeSeconds:+secs.toFixed(3),
+          realtimeFactor:+((N/FPS)/secs).toFixed(1)}; // >1 means faster than realtime
+}
+
+// ── 4. DSP benchmark: OFDM-like demod throughput in plain JS ───────────
+function fft(re,im){ // in-place iterative radix-2
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){ let bit=n>>1; for(;j&bit;bit>>=1) j^=bit; j^=bit;
+    if(i<j){ [re[i],re[j]]=[re[j],re[i]]; [im[i],im[j]]=[im[j],im[i]]; } }
+  for(let len=2;len<=n;len<<=1){ const ang=-2*Math.PI/len;
+    const wr=Math.cos(ang), wi=Math.sin(ang);
+    for(let i=0;i<n;i+=len){ let cr=1,ci=0;
+      for(let k=0;k<len/2;k++){ const a=i+k,b=i+k+len/2;
+        const tr=re[b]*cr-im[b]*ci, ti=re[b]*ci+im[b]*cr;
+        re[b]=re[a]-tr; im[b]=im[a]-ti; re[a]+=tr; im[a]+=ti;
+        const ncr=cr*wr-ci*wi; ci=cr*wi+ci*wr; cr=ncr; } } }
+}
+function dspBench(){
+  const SR=48000, N=512, CP=64, SL=N+CP, SECS=10;
+  const total=SR*SECS, sig=new Float32Array(total);
+  for(let i=0;i<total;i++) sig[i]=Math.sin(i*0.3)+Math.sin(i*0.13)*0.5;
+  const re=new Float32Array(N), im=new Float32Array(N);
+  const nsym=Math.floor((total-SL)/SL);
+  const t0=performance.now(); let acc=0;
+  for(let s=0;s<nsym;s++){ const base=s*SL+CP;
+    for(let k=0;k<N;k++){ re[k]=sig[base+k]; im[k]=0; }
+    fft(re,im);
+    for(let k=20;k<70;k++) acc+=Math.atan2(im[k],re[k]); // per-carrier phase
+  }
+  const secs=(performance.now()-t0)/1000;
+  return {symbols:nsym, audioSeconds:SECS, computeSeconds:+secs.toFixed(3),
+          realtimeFactor:+(SECS/secs).toFixed(1), _sink:acc};
+}
+
+// ── 5. Capture: can we open line-in with processing disabled? ──────────
+async function captureTest(){
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:{
+      autoGainControl:false, echoCancellation:false, noiseSuppression:false}});
+    const tr=stream.getAudioTracks()[0]; const st=tr.getSettings();
+    stream.getTracks().forEach(t=>t.stop());
+    return {ok:true, settings:{autoGainControl:st.autoGainControl,
+      echoCancellation:st.echoCancellation, noiseSuppression:st.noiseSuppression,
+      sampleRate:st.sampleRate}};
+  }catch(e){ return {ok:false, error:String(e)}; }
+}
+
+(async()=>{
+  try{ await codecSupport(); }catch(e){ R.codecSupport.error=String(e); }
+  // try the most cassette-relevant codecs at a low bitrate (~12 kbps target)
+  for(const [name,codec] of [['H.264','avc1.42001E'],['AV1','av01.0.01M.08'],['VP9','vp09.00.10.08']]){
+    try{ R.encodeDecode[name]=await encodeDecode(codec, 12000); }
+    catch(e){ R.encodeDecode[name]={error:String(e)}; }
+  }
+  try{ R.dsp=dspBench(); }catch(e){ R.dsp={error:String(e)}; }
+  try{ R.capture=await captureTest(); }catch(e){ R.capture={error:String(e)}; }
+  out.textContent = JSON.stringify(R,null,2);
+  window.__spikeResults = R;
+})();
+</script>
