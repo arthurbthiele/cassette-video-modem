@@ -26,7 +26,34 @@ const CODECS: Record<string, string> = {
 };
 const app = document.getElementById("app")!;
 const SAMPLE_BASE = `${import.meta.env.BASE_URL}samples/`; // bundled demo assets
+const SAMPLES = [
+  { file: "gradient.mp4", label: "Gradient — clean demo", note: "Smooth and low-motion — fits the channel easily." },
+  { file: "plasma.mp4", label: "Plasma — longer (~16s)", note: "A calmer, longer clip; still fits with room to spare." },
+  { file: "detail.mp4", label: "Test chart — detail limit", note: "Fine lines & gratings blur away at 128×96 grayscale." },
+  { file: "motion.mp4", label: "Busy motion — bitrate limit", note: "Too busy for the channel: encodes slower than real-time (⚠) and blocks up." },
+];
+let sampleIdx = 0;
 let mode: "encode" | "decode" = "encode";
+
+// Encode a video File to a modem WAV with the given settings — shared by the
+// encoder and by the decoder's "Try a sample tape" (which encodes on the fly so
+// any bundled sample can be demoed without shipping a WAV for each).
+async function encodeFileToWav(file: File, s: ModemSettings, video: VideoConfig, onProgress?: (f: number) => void): Promise<{ wav: Blob; fit: Awaited<ReturnType<typeof encodeToFitChannel>>; audioSecs: number; videoSecs: number }> {
+  const frames = await framesFromFile(file, { width: video.width, height: video.height, fps: video.fps, grayscale: true, onProgress });
+  const nFrames = frames.length;
+  const fit = await encodeToFitChannel(frames, { codec: video.codec, width: video.width, height: video.height, framerate: video.fps, gopSeconds: video.gopSeconds }, videoBitrateBudget(s, { fillFactor: 0.9 }), netBitsPerSec(s));
+  frames.forEach((f) => f.close());
+  const audio = Float32Array.from(encodeStream(fit.container, s, { width: video.width, height: video.height, fps: video.fps, codec: video.codec }));
+  return { wav: encodeWav(audio, s.sampleRate), fit, audioSecs: audio.length / s.sampleRate, videoSecs: nFrames / video.fps };
+}
+
+function sampleSelect(noteEl: HTMLElement): HTMLSelectElement {
+  const sel = el("select") as HTMLSelectElement;
+  SAMPLES.forEach((sm, i) => sel.append(el("option", { value: String(i), textContent: sm.label, selected: i === sampleIdx })));
+  noteEl.textContent = SAMPLES[sampleIdx].note;
+  sel.onchange = () => { sampleIdx = parseInt(sel.value); noteEl.textContent = SAMPLES[sampleIdx].note; };
+  return sel;
+}
 
 function render() {
   app.innerHTML = "";
@@ -119,13 +146,16 @@ function encodeView() {
     probe.src = URL.createObjectURL(f);
   });
   fileIn.onchange = () => { const f = fileIn.files?.[0]; if (f) applyVideoFile(f); };
+  const sampleNote = el("span", { className: "muted" });
+  const sampleSel = sampleSelect(sampleNote);
   const sampleVideoBtn = el("button", { className: "secondary", textContent: "Try a sample" }) as HTMLButtonElement;
   sampleVideoBtn.onclick = async () => {
     try {
-      log.textContent = "Loading sample video…";
-      const blob = await (await fetch(`${SAMPLE_BASE}gradient.mp4`)).blob();
-      const file = new File([blob], "gradient.mp4", { type: "video/mp4" });
-      setInputFile(fileIn, file); // so the input shows "gradient.mp4", not "no file chosen"
+      const sm = SAMPLES[sampleIdx];
+      log.textContent = `Loading ${sm.label}…`;
+      const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
+      const file = new File([blob], sm.file, { type: "video/mp4" });
+      setInputFile(fileIn, file); // so the input shows the filename, not "no file chosen"
       await applyVideoFile(file);
       await runEncode(); // one click: load + encode + show the result
     } catch (e) { log.textContent = "Couldn't load sample: " + (e as Error).message; }
@@ -182,7 +212,9 @@ function encodeView() {
       el("p", { className: "muted", textContent: profile.description }),
     ]),
     el("div", { className: "panel" }, [
-      el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn, sampleVideoBtn]),
+      el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn]),
+      el("div", { className: "row" }, [el("label", { textContent: "Or try a sample" }), sampleSel, sampleVideoBtn]),
+      el("div", { className: "row" }, [sampleNote]),
       el("div", { className: "row" }, [el("label", { textContent: "Codec" }), codecSel]),
       num("Width", video.width, (v) => (video.width = v), 16),
       el("div", { className: "row" }, [el("label", { textContent: "Height (auto from source)" }), heightInput]),
@@ -376,18 +408,26 @@ function decodeView() {
   profileSel.onchange = () => { decodeProfileIdx = parseInt(profileSel.value); Object.assign(s, PROFILES[decodeProfileIdx].settings); if (samples) reseek(0); render(); };
   const reapply = () => { if (samples) reseek(Math.floor(playhead)); };
 
+  const sampleTapeNote = el("span", { className: "muted" });
+  const sampleTapeSel = sampleSelect(sampleTapeNote);
   const sampleTapeBtn = el("button", { className: "secondary", textContent: "▶ Try a sample tape" }) as HTMLButtonElement;
   sampleTapeBtn.onclick = async () => {
     try {
-      stats.textContent = "Loading sample tape…";
-      decodeProfileIdx = 1; Object.assign(s, PROFILES[1].settings); profileSel.value = "1"; // match how the sample was encoded
+      const sm = SAMPLES[sampleIdx];
+      decodeProfileIdx = 1; Object.assign(s, PROFILES[1].settings); profileSel.value = "1"; // encode + decode with a known profile
       sourceMode = "file"; drawSrc();
-      const buf = await (await fetch(`${SAMPLE_BASE}gradient.wav`)).arrayBuffer();
-      setInputFile(fileIn, new File([buf], "gradient.wav", { type: "audio/wav" })); // show "gradient.wav" in the input
-      setReference(`${SAMPLE_BASE}gradient.mp4`); // show the source clip beside the decode
-      loadWav(buf, "sample tape —");
+      stats.textContent = `Preparing "${sm.label}" — encoding…`;
+      const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
+      const file = new File([blob], sm.file, { type: "video/mp4" });
+      const pv = PROFILES[1].video;
+      const video: VideoConfig = { width: pv.width, height: pv.height, fps: pv.fps, codec: CODECS["AV1 (best compression)"], gopSeconds: 2 };
+      const { wav } = await encodeFileToWav(file, s, video);
+      const buf = await wav.arrayBuffer();
+      setInputFile(fileIn, new File([buf], sm.file.replace(/\.mp4$/, ".wav"), { type: "audio/wav" }));
+      setReference(URL.createObjectURL(file)); // show the original beside the decode
+      loadWav(buf, `${sm.label} —`);
       playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
-    } catch (e) { warn.textContent = "Couldn't load sample: " + (e as Error).message; }
+    } catch (e) { warn.textContent = "Couldn't prepare sample: " + (e as Error).message; }
   };
 
   const popBtn = el("button", { className: "secondary", textContent: "⧉ Pop out" });
@@ -412,7 +452,8 @@ function decodeView() {
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(s, () => {}, () => render())]),
       srcRow,
-      el("div", { className: "row" }, [sampleTapeBtn, el("span", { className: "muted", textContent: "one-click demo — the Encode tab's sample clip, already encoded to a tape, played back" })]),
+      el("div", { className: "row" }, [el("label", { textContent: "Sample tape" }), sampleTapeSel, sampleTapeBtn]),
+      el("div", { className: "row" }, [sampleTapeNote]),
       liveRow,
       el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
       panel,
