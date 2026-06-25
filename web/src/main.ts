@@ -1,6 +1,12 @@
 // Cassette Video Modem — browser app. Encode (video → WAV) and Decode
 // (WAV / live audio → video). Both expose the full modem configuration and can
 // be paired deterministically via a saved .cassette config file.
+//
+// State model: a single module-level `state` object is the source of truth.
+// render() rebuilds the DOM from it and never resets it — so uploads, settings
+// and the encoding all persist until the page is reloaded. The encoding is the
+// shared artifact: encode writes it, decode reads it (encode output = decode
+// input). Only explicit user actions mutate state.
 
 import "./style.css";
 import { DEFAULT_SETTINGS, METADATA_SEQ, ModemSettings } from "./dsp/settings";
@@ -32,12 +38,34 @@ const SAMPLES = [
   { file: "detail.mp4", label: "Test chart — detail limit", note: "Fine lines & gratings blur away at 128×96 grayscale." },
   { file: "motion.mp4", label: "Busy motion — bitrate limit", note: "Too busy for the channel: encodes slower than real-time (⚠) and blocks up." },
 ];
-let sampleIdx = 0;
-let mode: "encode" | "decode" = "encode";
-// a loaded .cassette config, applied by whichever view renders next (survives the
-// re-render that loading triggers — otherwise the view rebuilds settings from its
-// profile and the loaded values are lost).
-let pendingConfig: { modem: ModemSettings; video: Partial<VideoConfig> } | null = null;
+
+const AV1 = CODECS["AV1 (best compression)"];
+const freshSettings = (i: number): ModemSettings => applyProfile({ ...DEFAULT_SETTINGS }, PROFILES[i]);
+const freshVideo = (i: number): VideoConfig => ({ width: PROFILES[i].video.width, height: PROFILES[i].video.height, fps: PROFILES[i].video.fps, codec: AV1, gopSeconds: 2 });
+
+// ── the single source of truth ──────────────────────────────────────────
+interface DecodeInput { wav: Blob; name: string; referenceUrl: string | null; sampleIdx: number | null }
+interface Encoding { wav: Blob; sourceUrl: string; modem: ModemSettings; video: VideoConfig; profileIdx: number; summary: string }
+const state = {
+  tab: "encode" as "encode" | "decode",
+  sampleIdx: 0,
+  encode: {
+    profileIdx: 1,
+    settings: freshSettings(1),
+    video: freshVideo(1),
+    sourceFile: null as File | null,
+    sourceAspect: 0, // source height/width, to re-derive height when the profile changes (0 = unknown)
+  },
+  decode: {
+    profileIdx: 1,
+    settings: freshSettings(1),
+    sourceMode: "file" as "file" | "live",
+    input: null as DecodeInput | null, // what to decode (file mode): the encoding, a sample, or a loaded WAV
+  },
+  encoding: null as Encoding | null, // encode output = decode input
+};
+let decodeAutoplay = false; // one-shot: "Play it back" wants the next decode render to auto-play
+let decodeRaf = 0;
 
 // Encode a video File to a modem WAV with the given settings — shared by the
 // encoder and by the decoder's "Try a sample tape" (which encodes on the fly so
@@ -51,12 +79,39 @@ async function encodeFileToWav(file: File, s: ModemSettings, video: VideoConfig,
   return { wav: encodeWav(audio, s.sampleRate), fit, audioSecs: audio.length / s.sampleRate, videoSecs: nFrames / video.fps };
 }
 
+// Reflect a programmatically-loaded file in the native input's label (Chromium
+// allows assigning .files via DataTransfer; harmless no-op where it doesn't).
+function setInputFile(input: HTMLInputElement, file: File): void {
+  try { const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; } catch { /* unsupported */ }
+}
+
 function sampleSelect(noteEl: HTMLElement): HTMLSelectElement {
   const sel = el("select") as HTMLSelectElement;
-  SAMPLES.forEach((sm, i) => sel.append(el("option", { value: String(i), textContent: sm.label, selected: i === sampleIdx })));
-  noteEl.textContent = SAMPLES[sampleIdx].note;
-  sel.onchange = () => { sampleIdx = parseInt(sel.value); noteEl.textContent = SAMPLES[sampleIdx].note; };
+  SAMPLES.forEach((sm, i) => sel.append(el("option", { value: String(i), textContent: sm.label, selected: i === state.sampleIdx })));
+  noteEl.textContent = SAMPLES[state.sampleIdx].note;
+  sel.onchange = () => { state.sampleIdx = parseInt(sel.value); noteEl.textContent = SAMPLES[state.sampleIdx].note; };
   return sel;
+}
+
+// Load a .cassette into the current tab's settings, then re-render. Settings live
+// in `state`, so they survive the render (the old bug was rebuilding them from
+// the profile after loading).
+function loadConfigButton(): HTMLElement {
+  const input = el("input", { type: "file", accept: ".cassette,.json,application/json" }) as HTMLInputElement;
+  input.style.display = "none";
+  input.onchange = async () => {
+    const f = input.files?.[0];
+    if (!f) return;
+    try {
+      const { modem, video } = fromConfigJSON(await f.text());
+      if (state.tab === "encode") { Object.assign(state.encode.settings, modem); Object.assign(state.encode.video, video); }
+      else Object.assign(state.decode.settings, modem);
+      render();
+    } catch (e) { alert("Could not read config: " + (e as Error).message); }
+  };
+  const btn = el("button", { className: "secondary", textContent: "Load config (.cassette)" });
+  btn.onclick = () => input.click();
+  return el("span", {}, [btn, input]);
 }
 
 function render() {
@@ -67,43 +122,20 @@ function render() {
   );
   const tabs = el("div", { className: "tabs" });
   for (const m of ["encode", "decode"] as const) {
-    const t = el("div", { className: "tab" + (mode === m ? " active" : ""), textContent: m === "encode" ? "Encode" : "Decode" });
-    t.onclick = () => { mode = m; render(); };
+    const t = el("div", { className: "tab" + (state.tab === m ? " active" : ""), textContent: m === "encode" ? "Encode" : "Decode" });
+    t.onclick = () => { state.tab = m; render(); };
     tabs.append(t);
   }
   app.append(tabs);
-  (mode === "encode" ? encodeView : decodeView)();
-}
-
-// Reflect a programmatically-loaded file in the native input's label (Chromium
-// allows assigning .files via DataTransfer; harmless no-op where it doesn't).
-function setInputFile(input: HTMLInputElement, file: File): void {
-  try { const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; } catch { /* unsupported */ }
-}
-
-function loadConfigButton(after: () => void): HTMLElement {
-  const input = el("input", { type: "file", accept: ".cassette,.json,application/json" }) as HTMLInputElement;
-  input.style.display = "none";
-  input.onchange = async () => {
-    const f = input.files?.[0];
-    if (!f) return;
-    try { pendingConfig = fromConfigJSON(await f.text()); after(); }
-    catch (e) { alert("Could not read config: " + (e as Error).message); }
-  };
-  const btn = el("button", { className: "secondary", textContent: "Load config (.cassette)" });
-  btn.onclick = () => input.click();
-  return el("span", {}, [btn, input]);
+  (state.tab === "encode" ? encodeView : decodeView)();
 }
 
 // ── ENCODE ──────────────────────────────────────────────────────────────
-let encodeProfileIdx = 1;
-
 function encodeView() {
-  const profile = PROFILES[encodeProfileIdx];
-  const s: ModemSettings = applyProfile({ ...DEFAULT_SETTINGS }, profile);
-  const video: VideoConfig = { width: profile.video.width, height: profile.video.height, fps: profile.video.fps, codec: CODECS["AV1 (best compression)"], gopSeconds: 2 };
-  let videoFile: File | null = null;
-  if (pendingConfig) { Object.assign(s, pendingConfig.modem); Object.assign(video, pendingConfig.video); pendingConfig = null; }
+  const E = state.encode;
+  const profile = PROFILES[E.profileIdx];
+  const s = E.settings; // mutate-in-place → persists in state
+  const video = E.video;
 
   const budget = el("div", { className: "mono" });
   const meter = el("div", { className: "meter" }, [el("span")]);
@@ -114,8 +146,14 @@ function encodeView() {
   };
 
   const profileSel = el("select") as HTMLSelectElement;
-  PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === encodeProfileIdx })));
-  profileSel.onchange = () => { encodeProfileIdx = parseInt(profileSel.value); render(); };
+  PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === E.profileIdx })));
+  profileSel.onchange = () => {
+    E.profileIdx = parseInt(profileSel.value);
+    E.settings = freshSettings(E.profileIdx); // choosing a preset loads its settings
+    E.video = freshVideo(E.profileIdx);
+    if (E.sourceAspect > 0) E.video.height = Math.max(8, Math.round((E.video.width * E.sourceAspect) / 8) * 8);
+    render();
+  };
 
   const num = (label: string, val: number, on: (v: number) => void, step = 1) => {
     const i = el("input", { type: "number", value: String(val), step: String(step) }) as HTMLInputElement;
@@ -129,15 +167,16 @@ function encodeView() {
   heightInput.oninput = () => { video.height = parseFloat(heightInput.value) || 0; updateBudget(); };
 
   const fileIn = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
+  if (E.sourceFile) setInputFile(fileIn, E.sourceFile); // restore the chosen file's label across renders
   const applyVideoFile = (f: File) => new Promise<void>((resolve) => {
-    videoFile = f;
+    E.sourceFile = f;
     const probe = document.createElement("video");
     probe.preload = "metadata";
     const done = () => { URL.revokeObjectURL(probe.src); resolve(); };
     probe.onloadedmetadata = () => {
       if (probe.videoWidth && probe.videoHeight) {
-        // match the source's aspect ratio (rounded to a multiple of 8)
-        video.height = Math.max(8, Math.round((video.width * probe.videoHeight) / probe.videoWidth / 8) * 8);
+        E.sourceAspect = probe.videoHeight / probe.videoWidth;
+        video.height = Math.max(8, Math.round((video.width * E.sourceAspect) / 8) * 8); // match source aspect (×8)
         heightInput.value = String(video.height);
         updateBudget();
       }
@@ -152,11 +191,11 @@ function encodeView() {
   const sampleVideoBtn = el("button", { className: "secondary", textContent: "Try a sample" }) as HTMLButtonElement;
   sampleVideoBtn.onclick = async () => {
     try {
-      const sm = SAMPLES[sampleIdx];
+      const sm = SAMPLES[state.sampleIdx];
       log.textContent = `Loading ${sm.label}…`;
       const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
       const file = new File([blob], sm.file, { type: "video/mp4" });
-      setInputFile(fileIn, file); // so the input shows the filename, not "no file chosen"
+      setInputFile(fileIn, file);
       await applyVideoFile(file);
       await runEncode(); // one click: load + encode + show the result
     } catch (e) { log.textContent = "Couldn't load sample: " + (e as Error).message; }
@@ -171,36 +210,44 @@ function encodeView() {
   audioEl.style.display = "none";
   const encodeBtn = el("button", { textContent: "ENCODE" }) as HTMLButtonElement;
 
+  // (re)build the result panel from the persisted encoding
+  const showResult = () => {
+    result.innerHTML = "";
+    audioEl.style.display = "none";
+    const enc = state.encoding;
+    if (!enc) return;
+    const url = URL.createObjectURL(enc.wav);
+    audioEl.src = url; audioEl.style.display = "";
+    log.textContent = enc.summary;
+    result.append(
+      Object.assign(el("button", { textContent: "▶ Play it back" }), {
+        onclick: () => {
+          state.decode.input = { wav: enc.wav, name: "cassette.wav", referenceUrl: enc.sourceUrl, sampleIdx: null };
+          state.decode.profileIdx = enc.profileIdx; state.decode.settings = { ...enc.modem }; state.decode.sourceMode = "file";
+          state.tab = "decode"; decodeAutoplay = true; render();
+        },
+      }),
+      el("a", { className: "dl", href: url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
+      Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(enc.modem, enc.video, "cassette.cassette") }),
+    );
+  };
+
   const runEncode = async () => {
-    if (!videoFile) { log.textContent = "Choose a video file first."; return; }
+    if (!E.sourceFile) { log.textContent = "Choose a video file first."; return; }
     if (video.width < 96 || video.height < 64) { log.textContent = "Resolution too small to decode reliably — use at least 96×64 (the video codec has a minimum)."; return; }
     encodeBtn.disabled = true;
     result.innerHTML = "";
     audioEl.style.display = "none";
     try {
       log.textContent = "Reading video frames…";
-      const frames = await framesFromFile(videoFile, { width: video.width, height: video.height, fps: video.fps, grayscale: true, onProgress: (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`) });
-      log.textContent = `Encoding ${frames.length} frames…`;
-      const fit = await encodeToFitChannel(frames, { codec: video.codec, width: video.width, height: video.height, framerate: video.fps, gopSeconds: video.gopSeconds }, videoBitrateBudget(s, { fillFactor: 0.9 }), netBitsPerSec(s));
-      frames.forEach((f) => f.close());
-      log.textContent = `Modulating ${fit.container.length} bytes…`;
-      const audio = Float32Array.from(encodeStream(fit.container, s, { width: video.width, height: video.height, fps: video.fps, codec: video.codec }));
-      const wav = encodeWav(audio, s.sampleRate);
-      const url = URL.createObjectURL(wav);
-      const videoSecs = frames.length / video.fps;
-      const audioSecs = audio.length / s.sampleRate;
+      const { wav, fit, audioSecs, videoSecs } = await encodeFileToWav(E.sourceFile, s, video, (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`));
       const rt = fit.fits ? `▶ fits the channel (audio ${(audioSecs / videoSecs).toFixed(2)}× video incl. lead-in)` : `⚠ ${(audioSecs / videoSecs).toFixed(2)}× — lower resolution/fps for real-time`;
-      log.textContent = `Done. ${fit.container.length} B → ${audioSecs.toFixed(1)}s audio · ${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps · ${rt}`;
-      audioEl.src = url; audioEl.style.display = "";
-      const src = videoFile!;
-      // hand this encode to the Decode tab: arriving there (via the tab) preloads
-      // it ready to play; "Play it back" jumps there and auto-plays.
-      pendingDecode = { wav, sourceUrl: URL.createObjectURL(src), modem: { ...s }, profileIdx: encodeProfileIdx, autoplay: false };
-      result.append(
-        Object.assign(el("button", { textContent: "▶ Play it back" }), { onclick: () => { pendingDecode = { wav, sourceUrl: URL.createObjectURL(src), modem: { ...s }, profileIdx: encodeProfileIdx, autoplay: true }; mode = "decode"; render(); } }),
-        el("a", { className: "dl", href: url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
-        Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(s, video, "cassette.cassette") }),
-      );
+      const summary = `Done. ${fit.container.length} B → ${audioSecs.toFixed(1)}s audio · ${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps · ${rt}`;
+      // record the encoding and point the Decode tab at it (encode output = decode input)
+      state.encoding = { wav, sourceUrl: URL.createObjectURL(E.sourceFile), modem: { ...s }, video: { ...video }, profileIdx: E.profileIdx, summary };
+      state.decode.input = { wav, name: "cassette.wav", referenceUrl: state.encoding.sourceUrl, sampleIdx: null };
+      state.decode.profileIdx = E.profileIdx; state.decode.settings = { ...s }; state.decode.sourceMode = "file";
+      showResult();
     } catch (e) {
       log.textContent = "Error: " + (e as Error).message;
     } finally {
@@ -212,7 +259,7 @@ function encodeView() {
   const panel = settingsPanel(s, updateBudget);
   app.append(
     el("div", { className: "panel" }, [
-      el("div", { className: "row" }, [el("label", { textContent: "Target device" }), profileSel, loadConfigButton(() => render())]),
+      el("div", { className: "row" }, [el("label", { textContent: "Target device" }), profileSel, loadConfigButton()]),
       el("p", { className: "muted", textContent: profile.description }),
     ]),
     el("div", { className: "panel" }, [
@@ -230,23 +277,15 @@ function encodeView() {
     el("div", { className: "panel" }, [el("div", { className: "row" }, [encodeBtn]), result, audioEl, log]),
   );
   updateBudget();
+  showResult(); // restore the last encoding's result across renders
 }
 
 // ── DECODE ──────────────────────────────────────────────────────────────
-let decodeProfileIdx = 1; // module-level so re-renders don't reset the selection
-let decodeRaf = 0;
-// handoff from "Play it back" on the encode page: the just-encoded WAV plus the
-// source clip and the exact modem settings used, so decode matches and shows the original.
-let pendingDecode: { wav: Blob; sourceUrl: string; modem: ModemSettings; profileIdx: number; autoplay: boolean } | null = null;
-
 function decodeView() {
   cancelAnimationFrame(decodeRaf);
-  if (pendingDecode) decodeProfileIdx = pendingDecode.profileIdx;
-  const s: ModemSettings = { ...DEFAULT_SETTINGS };
-  Object.assign(s, PROFILES[decodeProfileIdx].settings);
-  if (pendingDecode) Object.assign(s, pendingDecode.modem); // honour any hand-tweaks from the encoder
-  if (pendingConfig) { Object.assign(s, pendingConfig.modem); pendingConfig = null; }
-  let sourceMode: "file" | "live" = "file";
+  const D = state.decode;
+  const s = D.settings; // mutate-in-place → persists
+  let sourceMode = D.sourceMode;
   let deviceId: string | undefined;
 
   const meters = new Meters();
@@ -258,9 +297,9 @@ function decodeView() {
   refVideo.muted = true; (refVideo as any).playsInline = true;
   const decodedCell = el("div", { className: "cmp-cell" }, [el("div", { className: "cmp-label", textContent: "Decoded from audio" }), canvas]);
   const originalCell = el("div", { className: "cmp-cell" }, [el("div", { className: "cmp-label", textContent: "Original" }), refVideo]);
-  originalCell.style.display = "none"; // shown only once a reference video is set
+  originalCell.style.display = "none";
   const cmpRow = el("div", { className: "cmp" }, [decodedCell, originalCell]);
-  const canvasHolder = el("div", { className: "panel" }, [cmpRow]); // transport is appended below the videos
+  const canvasHolder = el("div", { className: "panel" }, [cmpRow]); // transport appended below the videos
   const setReference = (src: string) => { refVideo.src = src; refVideo.currentTime = 0; originalCell.style.display = ""; };
   const clearReference = () => { refVideo.removeAttribute("src"); refVideo.load(); originalCell.style.display = "none"; };
   const stats = el("div", { className: "mono muted", textContent: "Load an audio file (or pick a device)." });
@@ -287,15 +326,14 @@ function decodeView() {
     vdec!.pushRecords(parser.push(payload));
   }
 
-  // ── FILE: a self-paced transport (own play/pause/seek clock) drives real-time
-  // decoding of the in-memory samples — no autoplay gate, no capture loss. ──
+  // ── FILE: a self-paced transport drives real-time decoding of in-memory samples ──
   let samples: Float32Array | null = null;
   let fileRate = 44100;
-  let playhead = 0;   // sample position of the play clock
-  let fed = 0;        // samples fed to the decoder so far
+  let playhead = 0;
+  let fed = 0;
   let playing = false;
   let lastTick = 0;
-  let loadedSampleIdx: number | null = null; // which bundled sample is loaded (for re-encode on profile change), else null
+  let loadedSampleIdx: number | null = D.input?.sampleIdx ?? null;
 
   const playBtn = el("button", { textContent: "▶ Play" }) as HTMLButtonElement;
   const seek = el("input", { type: "range", min: "0", max: "1000", value: "0" }) as HTMLInputElement;
@@ -323,7 +361,13 @@ function decodeView() {
     transport.style.display = "";
     stats.textContent = `${label} ${(samples.length / fileRate).toFixed(1)}s — press play (or scrub to start anywhere)`;
   };
-  fileIn.onchange = async () => { const f = fileIn.files?.[0]; if (!f) return; loadedSampleIdx = null; clearReference(); loadWav(await f.arrayBuffer(), "loaded"); };
+  fileIn.onchange = async () => {
+    const f = fileIn.files?.[0];
+    if (!f) return;
+    D.input = { wav: f, name: f.name, referenceUrl: null, sampleIdx: null };
+    loadedSampleIdx = null; clearReference();
+    loadWav(await f.arrayBuffer(), "loaded");
+  };
 
   // ── LIVE: realtime capture ──
   let liveCap: Capture | null = null;
@@ -372,8 +416,7 @@ function decodeView() {
       seek.value = String(Math.floor((playhead / samples.length) * 1000));
       timeLabel.textContent = `${(playhead / fileRate).toFixed(1)}s`;
     }
-    // mirror the transport onto the "Original" reference video, and nudge it
-    // back into sync if it drifts (covers play/pause, end, and scrubbing)
+    // mirror the transport onto the "Original" reference video (play/pause/seek)
     if (refVideo.getAttribute("src")) {
       if (sourceMode === "file" && playing) { if (refVideo.paused) refVideo.play().catch(() => {}); }
       else if (!refVideo.paused) refVideo.pause();
@@ -400,7 +443,7 @@ function decodeView() {
     srcRow.append(el("label", { textContent: "Source" }));
     for (const m of ["file", "live"] as const) {
       const b = el("button", { className: "secondary" + (sourceMode === m ? " active" : ""), textContent: m === "file" ? "Audio file" : "Audio device" });
-      b.onclick = async () => { stopAll(); sourceMode = m; if (m === "live") await refreshDevices(); drawSrc(); };
+      b.onclick = async () => { stopAll(); sourceMode = m; D.sourceMode = m; if (m === "live") await refreshDevices(); drawSrc(); };
       srcRow.append(b);
     }
     srcRow.append(sourceMode === "file" ? fileIn : el("span"));
@@ -410,14 +453,13 @@ function decodeView() {
   drawSrc();
 
   const profileSel = el("select") as HTMLSelectElement;
-  PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === decodeProfileIdx })));
+  PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === D.profileIdx })));
   // Changing profile keeps the loaded audio and re-decodes in place (no full
-  // re-render, so nothing is lost). For a bundled sample we re-encode it under
-  // the new profile too — a tape only decodes with the profile it was made with,
-  // so this is how you view a sample through different profiles.
+  // re-render). For a bundled sample we re-encode it under the new profile — a
+  // tape only decodes with the profile it was made with.
   profileSel.onchange = () => {
-    decodeProfileIdx = parseInt(profileSel.value);
-    Object.assign(s, PROFILES[decodeProfileIdx].settings);
+    D.profileIdx = parseInt(profileSel.value);
+    Object.assign(s, freshSettings(D.profileIdx)); // mutate in place so the pipeline's `s` stays valid
     const fresh = settingsPanel(s, reapply, { hideSampleRate: true });
     panel.replaceWith(fresh); panel = fresh;
     if (loadedSampleIdx !== null) loadSampleTape().catch((e) => (warn.textContent = "Couldn't prepare sample: " + (e as Error).message));
@@ -427,18 +469,20 @@ function decodeView() {
 
   // encode the selected bundled clip with the current profile, then decode+play it
   async function loadSampleTape() {
-    const sm = SAMPLES[sampleIdx];
-    loadedSampleIdx = sampleIdx;
-    sourceMode = "file"; drawSrc();
-    stats.textContent = `Preparing "${sm.label}" (${PROFILES[decodeProfileIdx].name}) — encoding…`;
+    const sm = SAMPLES[state.sampleIdx];
+    loadedSampleIdx = state.sampleIdx;
+    sourceMode = "file"; D.sourceMode = "file"; drawSrc();
+    stats.textContent = `Preparing "${sm.label}" (${PROFILES[D.profileIdx].name}) — encoding…`;
     const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
     const file = new File([blob], sm.file, { type: "video/mp4" });
-    const pv = PROFILES[decodeProfileIdx].video;
-    const video: VideoConfig = { width: pv.width, height: pv.height, fps: pv.fps, codec: CODECS["AV1 (best compression)"], gopSeconds: 2 };
-    const { wav } = await encodeFileToWav(file, s, video);
+    const pv = PROFILES[D.profileIdx].video;
+    const v: VideoConfig = { width: pv.width, height: pv.height, fps: pv.fps, codec: AV1, gopSeconds: 2 };
+    const { wav } = await encodeFileToWav(file, s, v);
     const buf = await wav.arrayBuffer();
-    setInputFile(fileIn, new File([buf], sm.file.replace(/\.mp4$/, ".wav"), { type: "audio/wav" }));
-    setReference(URL.createObjectURL(file)); // show the original beside the decode
+    const referenceUrl = URL.createObjectURL(file);
+    D.input = { wav, name: sm.file.replace(/\.mp4$/, ".wav"), referenceUrl, sampleIdx: state.sampleIdx };
+    setInputFile(fileIn, new File([buf], D.input.name, { type: "audio/wav" }));
+    setReference(referenceUrl);
     loadWav(buf, `${sm.label} —`);
     playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
   }
@@ -458,17 +502,17 @@ function decodeView() {
     win.addEventListener("pagehide", () => decodedCell.append(canvas));
   };
 
-  // optional: show any video beside the decode output, for your own WAVs
+  // optional: attach any video as the "Original" for comparison (for your own WAVs)
   const refIn = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
   refIn.style.display = "none";
-  refIn.onchange = () => { const f = refIn.files?.[0]; if (f) setReference(URL.createObjectURL(f)); };
+  refIn.onchange = () => { const f = refIn.files?.[0]; if (f) { const u = URL.createObjectURL(f); if (D.input) D.input.referenceUrl = u; setReference(u); } };
   const refBtn = el("button", { className: "secondary", textContent: "Compare with original…" });
   refBtn.onclick = () => refIn.click();
 
   let panel = settingsPanel(s, reapply, { hideSampleRate: true });
   app.append(
     el("div", { className: "panel" }, [
-      el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(() => render())]),
+      el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton()]),
       srcRow,
       el("div", { className: "row" }, [el("label", { textContent: "Sample tape" }), sampleTapeSel, sampleTapeBtn]),
       el("div", { className: "row" }, [sampleTapeNote]),
@@ -481,18 +525,15 @@ function decodeView() {
   );
   canvasHolder.append(transport); // play bar sits below the two videos
 
-  // consume the handoff from the encode page: preload that WAV + its original.
-  // Arriving via the tab preloads it ready to play; "Play it back" auto-plays.
-  if (pendingDecode) {
-    const pd = pendingDecode; pendingDecode = null;
+  // restore the persisted decode input (the encoding, a sample, or a loaded WAV)
+  if (D.input && sourceMode === "file") {
+    const inp = D.input;
+    const wantAutoplay = decodeAutoplay; decodeAutoplay = false;
+    setInputFile(fileIn, new File([inp.wav], inp.name, { type: "audio/wav" }));
+    if (inp.referenceUrl) setReference(inp.referenceUrl);
     (async () => {
-      sourceMode = "file"; drawSrc();
-      const buf = await pd.wav.arrayBuffer();
-      setInputFile(fileIn, new File([buf], "cassette.wav", { type: "audio/wav" }));
-      setReference(pd.sourceUrl);
-      loadedSampleIdx = null; // it's the user's own encoded clip, not a bundled sample
-      loadWav(buf, "your encoded clip —");
-      if (pd.autoplay) { playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); }
+      loadWav(await inp.wav.arrayBuffer(), inp.sampleIdx !== null ? `${SAMPLES[inp.sampleIdx].label} —` : "loaded");
+      if (wantAutoplay) { playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); }
     })();
   }
 }
