@@ -9,6 +9,7 @@ import { encodeToFitChannel } from "./video/encoder";
 import { StreamVideoDecoder } from "./video/decoder";
 import { ContainerParser } from "./video/container";
 import { videoBitrateBudget, netBitsPerSec } from "./video/budget";
+import { encodeWav, decodeWav } from "./audio/wav";
 
 const CODEC = "av01.0.01M.08"; // AV1
 const W = 128, H = 96, FPS = 10, N = 30;
@@ -40,10 +41,14 @@ async function run() {
 
   const audio = encodeStream(container, s, { width: W, height: H, fps: FPS });
 
+  // Go through the WAV round-trip exactly like the UI's file path.
+  const wavBlob = encodeWav(Float32Array.from(audio), s.sampleRate);
+  const { samples } = decodeWav(await wavBlob.arrayBuffer());
+
   const ds = new DecoderState(s);
   const data = new Map<number, Uint8Array>();
-  for (let i = 0; i < audio.length; i += 4096)
-    for (const blk of ds.feedAudio(audio.subarray(i, i + 4096)))
+  for (let i = 0; i < samples.length; i += 4096)
+    for (const blk of ds.feedAudio(samples.subarray(i, i + 4096)))
       if (blk.seq !== METADATA_SEQ) data.set(blk.seq, blk.payload);
   const maxSeq = data.size ? Math.max(...data.keys()) : -1;
   const bytesArr: number[] = [];
