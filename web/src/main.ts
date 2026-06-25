@@ -34,6 +34,10 @@ const SAMPLES = [
 ];
 let sampleIdx = 0;
 let mode: "encode" | "decode" = "encode";
+// a loaded .cassette config, applied by whichever view renders next (survives the
+// re-render that loading triggers — otherwise the view rebuilds settings from its
+// profile and the loaded values are lost).
+let pendingConfig: { modem: ModemSettings; video: Partial<VideoConfig> } | null = null;
 
 // Encode a video File to a modem WAV with the given settings — shared by the
 // encoder and by the decoder's "Try a sample tape" (which encodes on the fly so
@@ -77,18 +81,14 @@ function setInputFile(input: HTMLInputElement, file: File): void {
   try { const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; } catch { /* unsupported */ }
 }
 
-function loadConfigButton(s: ModemSettings, onVideo: (v: Partial<VideoConfig>) => void, after: () => void): HTMLElement {
+function loadConfigButton(after: () => void): HTMLElement {
   const input = el("input", { type: "file", accept: ".cassette,.json,application/json" }) as HTMLInputElement;
   input.style.display = "none";
   input.onchange = async () => {
     const f = input.files?.[0];
     if (!f) return;
-    try {
-      const { modem, video } = fromConfigJSON(await f.text());
-      Object.assign(s, modem);
-      onVideo(video);
-      after();
-    } catch (e) { alert("Could not read config: " + (e as Error).message); }
+    try { pendingConfig = fromConfigJSON(await f.text()); after(); }
+    catch (e) { alert("Could not read config: " + (e as Error).message); }
   };
   const btn = el("button", { className: "secondary", textContent: "Load config (.cassette)" });
   btn.onclick = () => input.click();
@@ -103,6 +103,7 @@ function encodeView() {
   const s: ModemSettings = applyProfile({ ...DEFAULT_SETTINGS }, profile);
   const video: VideoConfig = { width: profile.video.width, height: profile.video.height, fps: profile.video.fps, codec: CODECS["AV1 (best compression)"], gopSeconds: 2 };
   let videoFile: File | null = null;
+  if (pendingConfig) { Object.assign(s, pendingConfig.modem); Object.assign(video, pendingConfig.video); pendingConfig = null; }
 
   const budget = el("div", { className: "mono" });
   const meter = el("div", { className: "meter" }, [el("span")]);
@@ -192,8 +193,11 @@ function encodeView() {
       log.textContent = `Done. ${fit.container.length} B → ${audioSecs.toFixed(1)}s audio · ${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps · ${rt}`;
       audioEl.src = url; audioEl.style.display = "";
       const src = videoFile!;
+      // hand this encode to the Decode tab: arriving there (via the tab) preloads
+      // it ready to play; "Play it back" jumps there and auto-plays.
+      pendingDecode = { wav, sourceUrl: URL.createObjectURL(src), modem: { ...s }, profileIdx: encodeProfileIdx, autoplay: false };
       result.append(
-        Object.assign(el("button", { textContent: "▶ Play it back" }), { onclick: () => { pendingDecode = { wav, sourceUrl: URL.createObjectURL(src), modem: { ...s }, profileIdx: encodeProfileIdx }; mode = "decode"; render(); } }),
+        Object.assign(el("button", { textContent: "▶ Play it back" }), { onclick: () => { pendingDecode = { wav, sourceUrl: URL.createObjectURL(src), modem: { ...s }, profileIdx: encodeProfileIdx, autoplay: true }; mode = "decode"; render(); } }),
         el("a", { className: "dl", href: url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
         Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(s, video, "cassette.cassette") }),
       );
@@ -208,7 +212,7 @@ function encodeView() {
   const panel = settingsPanel(s, updateBudget);
   app.append(
     el("div", { className: "panel" }, [
-      el("div", { className: "row" }, [el("label", { textContent: "Target device" }), profileSel, loadConfigButton(s, (v) => Object.assign(video, v), () => render())]),
+      el("div", { className: "row" }, [el("label", { textContent: "Target device" }), profileSel, loadConfigButton(() => render())]),
       el("p", { className: "muted", textContent: profile.description }),
     ]),
     el("div", { className: "panel" }, [
@@ -233,7 +237,7 @@ let decodeProfileIdx = 1; // module-level so re-renders don't reset the selectio
 let decodeRaf = 0;
 // handoff from "Play it back" on the encode page: the just-encoded WAV plus the
 // source clip and the exact modem settings used, so decode matches and shows the original.
-let pendingDecode: { wav: Blob; sourceUrl: string; modem: ModemSettings; profileIdx: number } | null = null;
+let pendingDecode: { wav: Blob; sourceUrl: string; modem: ModemSettings; profileIdx: number; autoplay: boolean } | null = null;
 
 function decodeView() {
   cancelAnimationFrame(decodeRaf);
@@ -241,6 +245,7 @@ function decodeView() {
   const s: ModemSettings = { ...DEFAULT_SETTINGS };
   Object.assign(s, PROFILES[decodeProfileIdx].settings);
   if (pendingDecode) Object.assign(s, pendingDecode.modem); // honour any hand-tweaks from the encoder
+  if (pendingConfig) { Object.assign(s, pendingConfig.modem); pendingConfig = null; }
   let sourceMode: "file" | "live" = "file";
   let deviceId: string | undefined;
 
@@ -463,7 +468,7 @@ function decodeView() {
   let panel = settingsPanel(s, reapply, { hideSampleRate: true });
   app.append(
     el("div", { className: "panel" }, [
-      el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(s, () => {}, () => render())]),
+      el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(() => render())]),
       srcRow,
       el("div", { className: "row" }, [el("label", { textContent: "Sample tape" }), sampleTapeSel, sampleTapeBtn]),
       el("div", { className: "row" }, [sampleTapeNote]),
@@ -476,7 +481,8 @@ function decodeView() {
   );
   canvasHolder.append(transport); // play bar sits below the two videos
 
-  // consume a "Play it back" handoff from the encode page: load that WAV + original and play
+  // consume the handoff from the encode page: preload that WAV + its original.
+  // Arriving via the tab preloads it ready to play; "Play it back" auto-plays.
   if (pendingDecode) {
     const pd = pendingDecode; pendingDecode = null;
     (async () => {
@@ -484,8 +490,9 @@ function decodeView() {
       const buf = await pd.wav.arrayBuffer();
       setInputFile(fileIn, new File([buf], "cassette.wav", { type: "audio/wav" }));
       setReference(pd.sourceUrl);
+      loadedSampleIdx = null; // it's the user's own encoded clip, not a bundled sample
       loadWav(buf, "your encoded clip —");
-      playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now();
+      if (pd.autoplay) { playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); }
     })();
   }
 }
