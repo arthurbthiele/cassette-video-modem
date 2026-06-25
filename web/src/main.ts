@@ -5,9 +5,10 @@ import "./style.css";
 import { DEFAULT_SETTINGS, METADATA_SEQ, ModemSettings, Method } from "./dsp/settings";
 import { encodeStream, decodeMetadataPayload } from "./dsp/modem";
 import { DecoderState } from "./dsp/decoderState";
-import { netKBytesPerSec, videoBitrateBudget } from "./video/budget";
+import { netKBytesPerSec, netBitsPerSec, videoBitrateBudget } from "./video/budget";
 import { framesFromFile } from "./video/source";
-import { encodeFramesToContainer } from "./video/encoder";
+import { encodeToFitChannel } from "./video/encoder";
+import { PROFILES, applyProfile } from "./profiles";
 import { StreamVideoDecoder } from "./video/decoder";
 import { ContainerParser } from "./video/container";
 import { encodeWav, decodeWav } from "./audio/wav";
@@ -54,16 +55,23 @@ function methodSelect(s: ModemSettings, onChange: () => void): HTMLElement {
 }
 
 // ── ENCODE ──────────────────────────────────────────────────────────────
+let encodeProfileIdx = 1; // default: "Good cassette / tape deck"
+
 function encodeView() {
-  const s: ModemSettings = { ...DEFAULT_SETTINGS };
-  const vset = { width: 256, height: 144, fps: 12, grayscale: true, codecLabel: "AV1 (best compression)", gopSeconds: 2, fillFactor: 0.9 };
+  const profile = PROFILES[encodeProfileIdx];
+  const s: ModemSettings = applyProfile({ ...DEFAULT_SETTINGS }, profile);
+  const vset = { width: profile.video.width, height: profile.video.height, fps: profile.video.fps, grayscale: true, codecLabel: "AV1 (best compression)", gopSeconds: 2 };
   let videoFile: File | null = null;
+
+  const profileSel = el("select") as HTMLSelectElement;
+  PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === encodeProfileIdx })));
+  profileSel.onchange = () => { encodeProfileIdx = parseInt(profileSel.value); render(); };
 
   const budget = el("div", { className: "mono" });
   const meter = el("div", { className: "meter" }, [el("span")]);
   const updateBudget = () => {
     const netKBs = netKBytesPerSec(s);
-    const vbps = videoBitrateBudget(s, { fillFactor: vset.fillFactor });
+    const vbps = videoBitrateBudget(s, { fillFactor: 0.9 });
     budget.textContent = `Channel: ${netKBs.toFixed(3)} KB/s net  ·  video budget: ${(vbps / 1000).toFixed(2)} kbps  ·  ${vset.width}×${vset.height} @ ${vset.fps}fps`;
     (meter.firstChild as HTMLElement).style.width = `${Math.min(100, (netKBs / 1.2) * 100)}%`;
   };
@@ -95,14 +103,19 @@ function encodeView() {
       log.textContent = "Decoding video frames…";
       const frames = await framesFromFile(videoFile, { width: vset.width, height: vset.height, fps: vset.fps, grayscale: vset.grayscale, onProgress: (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`) });
       log.textContent = `Encoding ${frames.length} frames (${vset.codecLabel})…`;
-      const bitrate = videoBitrateBudget(s, { fillFactor: vset.fillFactor });
-      const container = await encodeFramesToContainer(frames, { codec: CODECS[vset.codecLabel], width: vset.width, height: vset.height, framerate: vset.fps, bitrate, gopSeconds: vset.gopSeconds });
+      const startBitrate = videoBitrateBudget(s, { fillFactor: 0.9 });
+      const fit = await encodeToFitChannel(frames, { codec: CODECS[vset.codecLabel], width: vset.width, height: vset.height, framerate: vset.fps, gopSeconds: vset.gopSeconds }, startBitrate, netBitsPerSec(s));
+      frames.forEach((f) => f.close());
+      const container = fit.container;
       log.textContent = `Modulating ${container.length} bytes to audio…`;
       const audio = encodeStream(container, s, { width: vset.width, height: vset.height, fps: vset.fps, codec: CODECS[vset.codecLabel] });
       const wav = encodeWav(Float32Array.from(audio), s.sampleRate);
       const url = URL.createObjectURL(wav);
-      const secs = (audio.length / s.sampleRate).toFixed(1);
-      log.textContent = `Done. ${container.length} B video → ${secs}s of audio (${(wav.size / 1024) | 0} KB WAV).`;
+      const videoSecs = frames.length / vset.fps;
+      const audioSecs = audio.length / s.sampleRate;
+      const ratio = audioSecs / videoSecs;
+      const realtime = fit.fits ? `▶ real-time (${ratio.toFixed(2)}× incl. lead-in)` : `⚠ ${ratio.toFixed(2)}× — over budget, lower resolution/fps for real-time`;
+      log.textContent = `Done. ${container.length} B video → ${audioSecs.toFixed(1)}s audio (${(wav.size / 1024) | 0} KB WAV) · ${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps after ${fit.attempts} pass(es) · ${realtime}`;
       result.append(
         el("a", { className: "dl", href: url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
         Object.assign(el("button", { className: "secondary", textContent: "▶ Play out" }), { onclick: () => playback.play(Float32Array.from(audio), s.sampleRate) }),
@@ -115,6 +128,10 @@ function encodeView() {
   };
 
   app.append(
+    el("div", { className: "panel" }, [
+      el("div", { className: "row" }, [el("label", { textContent: "Target device" }), profileSel]),
+      el("p", { className: "muted", textContent: profile.description }),
+    ]),
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn]),
       el("div", { className: "row" }, [el("label", { textContent: "Codec" }), codecSel]),

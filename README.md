@@ -14,16 +14,26 @@ VIDEO ─encode─▶ bytes ─frame+RS─▶ modulate ─▶ WAV ─▶ [tape] 
 
 | Dir | What | Status |
 |---|---|---|
-| **`web/`** | Browser/TypeScript app — the primary target. Runs with no install (open a page), real-time playback via WebCodecs, richer UI. | **In progress** (rewrite) |
-| **`python/`** | The original Python + tkinter implementation. | Working; now the **reference** the web port is validated against |
+| **`web/`** | Browser/TypeScript app — the primary target. No install, real-time playback via WebCodecs, richer UI. | **Working** — full encode/decode loop |
+| **`python/`** | The original Python + tkinter implementation. | Working; the **reference** the web port is validated against |
 
-### Run the web app (dev)
+### The web app
+Open it (hosted) or run locally:
 ```
 cd web
 npm install
-npm run dev          # opens a local dev server
-npm run build        # static build → web/dist/  (deploys to GitHub/Cloudflare Pages)
+npm run dev          # local dev server (Chrome recommended — uses WebCodecs)
+npm run build        # static build → web/dist/  (deployed to GitHub Pages by CI)
 ```
+- **Encode** tab: pick a video, choose a device profile (cheap deck → CD), watch
+  the throughput meter, **ENCODE** → download a `.wav` (or play it out to a deck).
+  The encoder auto-budgets the video bitrate to the channel so playback is
+  real-time.
+- **Decode** tab: feed a **WAV file** or **live line-in** → the video renders on a
+  canvas; pop it out into a Picture-in-Picture window. Resolution auto-detects.
+
+Tests: `npm test` (49+ checks; the TS DSP is validated sample/byte-exact against
+the Python reference). Best in Chrome/Edge (WebCodecs).
 
 ### Run the Python reference
 ```

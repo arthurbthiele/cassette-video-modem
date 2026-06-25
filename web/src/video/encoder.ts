@@ -39,8 +39,7 @@ export async function encodeFramesToContainer(frames: Iterable<VideoFrame>, opts
   let i = 0;
   for (const frame of frames) {
     enc.encode(frame, { keyFrame: i % gop === 0 });
-    frame.close();
-    i++;
+    i++; // caller owns the frames (so they can be re-encoded to fit the channel)
   }
   await enc.flush();
   enc.close();
@@ -59,4 +58,38 @@ export async function encodeFramesToContainer(frames: Iterable<VideoFrame>, opts
   let o = 0;
   for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
+}
+
+export interface FitResult {
+  container: Uint8Array;
+  bitrate: number; // final encoder target used
+  attempts: number;
+  containerBitsPerSec: number;
+  fits: boolean; // container rate ≤ channel net rate
+}
+
+/** Encode the frames, iterating the target bitrate down until the encoded
+ * stream fits the channel's net throughput — so playback stays real-time.
+ * The encoder (esp. AV1) overshoots low targets, so one pass isn't enough. */
+export async function encodeToFitChannel(
+  frames: VideoFrame[],
+  opts: Omit<VideoEncodeOptions, "bitrate">,
+  startBitrate: number,
+  netBitsPerSec: number,
+  maxAttempts = 4,
+): Promise<FitResult> {
+  const durationSec = frames.length / opts.framerate;
+  const target = netBitsPerSec * 0.92; // leave headroom for modem framing + jitter
+  let bitrate = Math.min(startBitrate, Math.floor(target));
+  let container: Uint8Array = new Uint8Array(0);
+  let attempts = 0;
+  let containerBitsPerSec = 0;
+  for (; attempts < maxAttempts; attempts++) {
+    container = await encodeFramesToContainer(frames, { ...opts, bitrate });
+    containerBitsPerSec = (container.length * 8) / durationSec;
+    if (containerBitsPerSec <= target) break;
+    // overshot — scale the target down proportionally and retry
+    bitrate = Math.max(1000, Math.floor(bitrate * (target / containerBitsPerSec) * 0.95));
+  }
+  return { container, bitrate, attempts: attempts + 1, containerBitsPerSec, fits: containerBitsPerSec <= netBitsPerSec };
 }

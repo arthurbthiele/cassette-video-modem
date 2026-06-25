@@ -5,10 +5,10 @@
 import { DEFAULT_SETTINGS, METADATA_SEQ, ModemSettings } from "./dsp/settings";
 import { encodeStream } from "./dsp/modem";
 import { DecoderState } from "./dsp/decoderState";
-import { encodeFramesToContainer } from "./video/encoder";
+import { encodeToFitChannel } from "./video/encoder";
 import { StreamVideoDecoder } from "./video/decoder";
 import { ContainerParser } from "./video/container";
-import { videoBitrateBudget } from "./video/budget";
+import { videoBitrateBudget, netBitsPerSec } from "./video/budget";
 
 const CODEC = "av01.0.01M.08"; // AV1
 const W = 128, H = 96, FPS = 10, N = 30;
@@ -33,8 +33,10 @@ async function run() {
   }
 
   const s: ModemSettings = { ...DEFAULT_SETTINGS, method: "ofdm", blockDataSize: 256, preambleMs: 100 };
-  const bitrate = videoBitrateBudget(s, { fillFactor: 0.9 });
-  const container = await encodeFramesToContainer(frames, { codec: CODEC, width: W, height: H, framerate: FPS, bitrate, gopSeconds: 1 });
+  const start = videoBitrateBudget(s, { fillFactor: 0.9 });
+  const fit = await encodeToFitChannel(frames, { codec: CODEC, width: W, height: H, framerate: FPS, gopSeconds: 1 }, start, netBitsPerSec(s));
+  frames.forEach((f) => f.close());
+  const container = fit.container;
 
   const audio = encodeStream(container, s, { width: W, height: H, fps: FPS });
 
@@ -73,7 +75,8 @@ async function run() {
     meanDiff = sum / cnt;
   }
 
-  const result = { containerLen: container.length, recoveredLen: recovered.length, containerByteExact, framesIn: N, framesOut: decoded.length, audioSamples: audio.length, audioSeconds: +(audio.length / s.sampleRate).toFixed(2), videoSeconds: N / FPS, bitrate, meanPixelDiff: +meanDiff.toFixed(2) };
+  const audioSeconds = audio.length / s.sampleRate;
+  const result = { containerLen: container.length, recoveredLen: recovered.length, containerByteExact, framesIn: N, framesOut: decoded.length, audioSeconds: +audioSeconds.toFixed(2), videoSeconds: N / FPS, realtimeRatio: +(audioSeconds / (N / FPS)).toFixed(2), fits: fit.fits, fitAttempts: fit.attempts, finalBitrate: fit.bitrate, meanPixelDiff: +meanDiff.toFixed(2) };
   (window as any).__result = result;
   document.getElementById("out")!.textContent = JSON.stringify(result, null, 2);
 }

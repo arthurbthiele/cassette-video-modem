@@ -170,7 +170,7 @@ export function encodeStream(videoBytes: Uint8Array, s: ModemSettings, vset?: Re
 
   const dataAudio = modulate(stream, s);
   const tone = generatePreamble(s);
-  const tail = Math.floor(s.sampleRate * 0.5);
+  const tail = Math.floor(s.sampleRate * 0.2); // brief AGC-settle tail
   let audio: Float64Array = new Float64Array(tone.length + dataAudio.length + tail);
   audio.set(tone, 0);
   audio.set(dataAudio, tone.length);

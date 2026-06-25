@@ -38,6 +38,18 @@ describe("full modem round-trip (TS encode → streaming decode)", () => {
   }
 });
 
+describe("constant-power carrier (AGC defeat) round-trips for FSK/DPSK", () => {
+  for (const method of ["fsk", "dpsk"] as Method[]) {
+    it(`${method} + constant_power recovers the payload`, () => {
+      const s: ModemSettings = { ...DEFAULT_SETTINGS, method, constantPower: true };
+      const payload = Uint8Array.from({ length: 250 }, (_, i) => (i * 53) % 256);
+      const audio = encodeStream(payload, s);
+      const data = decodeAll(audio, s);
+      expect(Array.from(reassemble(data, s.blockDataSize, payload.length))).toEqual(Array.from(payload));
+    });
+  }
+});
+
 describe("cross-validation: TS decodes Python-encoded OFDM audio", () => {
   it("recovers the payload from the Python e2e audio vector", () => {
     const v = vectors.ofdmE2E;
