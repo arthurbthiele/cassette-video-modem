@@ -95,10 +95,11 @@ function encodeView() {
   heightInput.oninput = () => { video.height = parseFloat(heightInput.value) || 0; updateBudget(); };
 
   const fileIn = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
-  const applyVideoFile = (f: File) => {
+  const applyVideoFile = (f: File) => new Promise<void>((resolve) => {
     videoFile = f;
     const probe = document.createElement("video");
     probe.preload = "metadata";
+    const done = () => { URL.revokeObjectURL(probe.src); resolve(); };
     probe.onloadedmetadata = () => {
       if (probe.videoWidth && probe.videoHeight) {
         // match the source's aspect ratio (rounded to a multiple of 8)
@@ -106,18 +107,19 @@ function encodeView() {
         heightInput.value = String(video.height);
         updateBudget();
       }
-      URL.revokeObjectURL(probe.src);
+      done();
     };
+    probe.onerror = done;
     probe.src = URL.createObjectURL(f);
-  };
+  });
   fileIn.onchange = () => { const f = fileIn.files?.[0]; if (f) applyVideoFile(f); };
   const sampleVideoBtn = el("button", { className: "secondary", textContent: "Try a sample" }) as HTMLButtonElement;
   sampleVideoBtn.onclick = async () => {
     try {
       log.textContent = "Loading sample video…";
       const blob = await (await fetch(`${SAMPLE_BASE}gradient.mp4`)).blob();
-      applyVideoFile(new File([blob], "gradient.mp4", { type: "video/mp4" }));
-      log.textContent = "Sample loaded — press ENCODE.";
+      await applyVideoFile(new File([blob], "gradient.mp4", { type: "video/mp4" }));
+      await runEncode(); // one click: load + encode + show the result
     } catch (e) { log.textContent = "Couldn't load sample: " + (e as Error).message; }
   };
   const codecSel = el("select") as HTMLSelectElement;
@@ -130,7 +132,7 @@ function encodeView() {
   audioEl.style.display = "none";
   const encodeBtn = el("button", { textContent: "ENCODE" }) as HTMLButtonElement;
 
-  encodeBtn.onclick = async () => {
+  const runEncode = async () => {
     if (!videoFile) { log.textContent = "Choose a video file first."; return; }
     if (video.width < 96 || video.height < 64) { log.textContent = "Resolution too small to decode reliably — use at least 96×64 (the video codec has a minimum)."; return; }
     encodeBtn.disabled = true;
@@ -161,6 +163,7 @@ function encodeView() {
       encodeBtn.disabled = false;
     }
   };
+  encodeBtn.onclick = runEncode;
 
   const panel = settingsPanel(s, updateBudget);
   app.append(
