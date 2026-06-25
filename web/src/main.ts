@@ -55,6 +55,7 @@ const state = {
     video: freshVideo(1),
     sourceFile: null as File | null,
     sourceAspect: 0, // source height/width, to re-derive height when the profile changes (0 = unknown)
+    colour: false,   // encode in colour instead of grayscale (same bitrate → trades detail for colour)
   },
   decode: {
     profileIdx: 1,
@@ -79,8 +80,8 @@ function setEncoding(enc: Encoding | null): void {
 // Encode a video File to a modem WAV with the given settings — shared by the
 // encoder and by the decoder's "Try a sample tape" (which encodes on the fly so
 // any bundled sample can be demoed without shipping a WAV for each).
-async function encodeFileToWav(file: File, s: ModemSettings, video: VideoConfig, onProgress?: (f: number) => void): Promise<{ wav: Blob; fit: Awaited<ReturnType<typeof encodeToFitChannel>>; audioSecs: number; videoSecs: number }> {
-  const frames = await framesFromFile(file, { width: video.width, height: video.height, fps: video.fps, grayscale: true, onProgress });
+async function encodeFileToWav(file: File, s: ModemSettings, video: VideoConfig, grayscale: boolean, onProgress?: (f: number) => void): Promise<{ wav: Blob; fit: Awaited<ReturnType<typeof encodeToFitChannel>>; audioSecs: number; videoSecs: number }> {
+  const frames = await framesFromFile(file, { width: video.width, height: video.height, fps: video.fps, grayscale, onProgress });
   const nFrames = frames.length;
   const fit = await encodeToFitChannel(frames, { codec: video.codec, width: video.width, height: video.height, framerate: video.fps, gopSeconds: video.gopSeconds }, videoBitrateBudget(s, { fillFactor: 0.9 }), netBitsPerSec(s));
   frames.forEach((f) => f.close());
@@ -168,16 +169,22 @@ function encodeView() {
     render();
   };
 
-  const num = (label: string, val: number, on: (v: number) => void, step = 1) => {
+  const num = (label: string, val: number, on: (v: number) => void, step = 1, tip = "") => {
     const i = el("input", { type: "number", value: String(val), step: String(step) }) as HTMLInputElement;
     i.style.width = "90px";
     i.oninput = () => { on(parseFloat(i.value) || 0); updateBudget(); };
-    return el("div", { className: "row" }, [el("label", { textContent: label }), i]);
+    return el("div", { className: "row" }, [el("label", { textContent: label, title: tip }), i]);
   };
 
   const heightInput = el("input", { type: "number", value: String(video.height), step: "8" }) as HTMLInputElement;
   heightInput.style.width = "90px";
   heightInput.oninput = () => { video.height = parseFloat(heightInput.value) || 0; updateBudget(); };
+
+  const colourCheck = el("input", { type: "checkbox", checked: E.colour }) as HTMLInputElement;
+  colourCheck.onchange = () => { E.colour = colourCheck.checked; };
+
+  const saveConfigBtn = el("button", { className: "secondary", textContent: "Save config (.cassette)" });
+  saveConfigBtn.onclick = () => downloadConfig(s, video, "cassette.cassette");
 
   const fileIn = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
   if (E.sourceFile) setInputFile(fileIn, E.sourceFile); // restore the chosen file's label across renders
@@ -235,7 +242,6 @@ function encodeView() {
     log.textContent = enc.summary;
     result.append(
       el("a", { className: "dl", href: enc.url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
-      Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(enc.modem, enc.video, "cassette.cassette") }),
     );
     playbackRow.append(
       Object.assign(el("button", { textContent: "▶ Decode and play back" }), {
@@ -256,7 +262,7 @@ function encodeView() {
     audioEl.style.display = "none";
     try {
       log.textContent = "Reading video frames…";
-      const { wav, fit, audioSecs, videoSecs } = await encodeFileToWav(E.sourceFile, s, video, (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`));
+      const { wav, fit, audioSecs, videoSecs } = await encodeFileToWav(E.sourceFile, s, video, !E.colour, (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`));
       const ratio = (audioSecs / videoSecs).toFixed(2);
       const rt = fit.fits
         ? `▶ fits the channel — plays back in real time (audio ${ratio}× the video).`
@@ -279,18 +285,19 @@ function encodeView() {
   app.append(
     el("div", { className: "panel" }, [
       el("p", { className: "muted", textContent: "Turn a video into audio you can record onto tape: pick a clip (or a sample), press ENCODE, then download the WAV. To watch it back, open the Decode tab." }),
-      el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton()]),
+      el("div", { className: "row" }, [el("label", { textContent: "Profile", title: "Preset for a target medium — sets all the modem settings below. The decoder must use the same profile (or load the saved .cassette)." }), profileSel, loadConfigButton(), saveConfigBtn]),
       el("p", { className: "muted", textContent: `${profile.description} The decoder must use this same profile.` }),
     ]),
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn]),
       el("div", { className: "row" }, [el("label", { textContent: "Or try a sample" }), sampleSel, sampleVideoBtn]),
       el("div", { className: "row" }, [sampleNote]),
-      el("div", { className: "row" }, [el("label", { textContent: "Codec" }), codecSel]),
-      num("Width", video.width, (v) => (video.width = v), 16),
-      el("div", { className: "row" }, [el("label", { textContent: "Height (auto from source)" }), heightInput]),
-      num("Frame rate", video.fps, (v) => (video.fps = v)),
-      num("Keyframe interval (s)", video.gopSeconds, (v) => (video.gopSeconds = v)),
+      el("div", { className: "row" }, [el("label", { textContent: "Codec", title: "Video codec. AV1 compresses best (recommended for the tiny channel); H.264 is the most broadly supported." }), codecSel]),
+      el("div", { className: "row" }, [el("label", { textContent: "Colour", title: "Encode in colour instead of grayscale. Same bitrate, so colour steals detail from the picture — best on roomy profiles (Clean line / CD)." }), colourCheck]),
+      num("Width", video.width, (v) => (video.width = v), 16, "Picture width in pixels. Smaller = fewer bits, fits more easily."),
+      el("div", { className: "row" }, [el("label", { textContent: "Height (auto from source)", title: "Picture height — auto-set from your video's aspect ratio (a multiple of 8). Smaller = fewer bits." }), heightInput]),
+      num("Frame rate", video.fps, (v) => (video.fps = v), 1, "Frames per second. Lower = fewer bits and an easier fit."),
+      num("Keyframe interval (s)", video.gopSeconds, (v) => (video.gopSeconds = v), 1, "Seconds between full keyframes. Longer compresses better, but a dropout costs more until the next keyframe."),
     ]),
     el("div", { className: "panel" }, [el("p", { className: "muted", textContent: "Modem settings (must match the decoder — save a config to pair them)" }), panel]),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [el("label", { textContent: "Throughput" }), budget]), el("div", { className: "row" }, [meter])]),
@@ -519,7 +526,7 @@ function decodeView() {
     try {
       const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
       const file = new File([blob], sm.file, { type: "video/mp4" });
-      const { wav } = await encodeFileToWav(file, s, freshVideo(D.profileIdx));
+      const { wav } = await encodeFileToWav(file, s, freshVideo(D.profileIdx), true);
       const buf = await wav.arrayBuffer();
       const referenceUrl = URL.createObjectURL(file);
       if (D.input?.referenceUrl && D.input.referenceUrl !== state.encoding?.sourceUrl) URL.revokeObjectURL(D.input.referenceUrl);
