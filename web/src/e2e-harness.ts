@@ -12,6 +12,7 @@ import { StreamVideoDecoder } from "./video/decoder";
 import { ContainerParser } from "./video/container";
 import { encodeWav, decodeWav } from "./audio/wav";
 import { simulateChannel, ChannelOptions } from "./dsp/channel";
+import { pilotResample } from "./dsp/pilot";
 import { PROFILES, applyProfile } from "./profiles";
 
 const out = document.getElementById("out")!;
@@ -76,6 +77,24 @@ async function runProfile(name: string, settings: Partial<ModemSettings>, video:
   };
 }
 
+// Validate the pilot tachometer at the data level (the case Python proved):
+// FSK + pilot through pure wow/flutter — does the tacho recover the blocks?
+function tachoDataTest(method: "fsk" | "dpsk", pilotHz: number) {
+  const s = { ...DEFAULT_SETTINGS, method, reedSolomon: true, rsNsym: 16, pilotTone: true, pilotHz, pilotAmp: 0.18 };
+  const data = new Uint8Array(2000);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 37) % 256;
+  const audio = Float32Array.from(encodeStream(data, s));
+  const wow = simulateChannel(audio, { sampleRate: s.sampleRate, wowDepth: 0.003, flutterDepth: 0.0015 });
+  const blocksOf = (smp: Float32Array) => {
+    const ds = new DecoderState(s);
+    let bl = 0;
+    for (let i = 0; i < smp.length; i += 4096) for (const b of ds.feedAudio(smp.subarray(i, i + 4096))) if (b.seq !== METADATA_SEQ) bl++;
+    return bl;
+  };
+  const expected = Math.ceil(data.length / s.blockDataSize);
+  return { expected, noTacho: blocksOf(wow), withTacho: blocksOf(pilotResample(wow, s.sampleRate, s.pilotHz)) };
+}
+
 (async () => {
   const results: Record<string, any> = {};
   for (const p of PROFILES) {
@@ -83,6 +102,9 @@ async function runProfile(name: string, settings: Partial<ModemSettings>, video:
     try { results[p.name] = await runProfile(p.name, p.settings, p.video); }
     catch (e) { results[p.name] = { pass: false, error: String(e) }; }
   }
+  out.textContent = "tachometer test…";
+  try { results["_tacho FSK (data, wow)"] = tachoDataTest("fsk", 700); } catch (e) { results["_tacho FSK"] = { error: String(e) }; }
+  try { results["_tacho DPSK (data, wow)"] = tachoDataTest("dpsk", 700); } catch (e) { results["_tacho DPSK"] = { error: String(e) }; }
   const allPass = Object.values(results).every((r: any) => r.pass);
   out.textContent = (allPass ? "ALL PROFILES PASS\n\n" : "SOME PROFILES FAILED\n\n") + JSON.stringify(results, null, 2);
   (window as any).__e2e = { allPass, results };

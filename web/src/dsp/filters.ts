@@ -89,6 +89,28 @@ export function lfilter(b: number[], a: number[], x: ArrayLike<number>, zi?: num
   return { y, zf: z };
 }
 
+/** Zero-phase filtering (forward then reverse) — no group delay, so it won't
+ * shift the signal (important near OFDM timing). Simpler than scipy's edge
+ * handling; the edge transient is negligible for our long signals. */
+export function filtfilt(b: number[], a: number[], x: ArrayLike<number>): Float64Array {
+  const fwd = lfilter(b, a, x).y;
+  fwd.reverse();
+  const back = lfilter(b, a, fwd).y;
+  back.reverse();
+  return back;
+}
+
+/** RBJ band-reject (notch) biquad at f0. */
+export function notchBiquad(f0: number, sampleRate: number, Q = 12): { b: number[]; a: number[] } {
+  const w0 = (2 * Math.PI * f0) / sampleRate;
+  const alpha = Math.sin(w0) / (2 * Q);
+  const a0 = 1 + alpha;
+  return {
+    b: [1 / a0, (-2 * Math.cos(w0)) / a0, 1 / a0],
+    a: [1, (-2 * Math.cos(w0)) / a0, (1 - alpha) / a0],
+  };
+}
+
 export function applyPreEmphasis(audio: Float64Array, alpha: number): Float64Array {
   const out = new Float64Array(audio.length);
   let prev = 0;
