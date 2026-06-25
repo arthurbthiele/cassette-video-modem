@@ -290,6 +290,7 @@ function decodeView() {
   let fed = 0;        // samples fed to the decoder so far
   let playing = false;
   let lastTick = 0;
+  let loadedSampleIdx: number | null = null; // which bundled sample is loaded (for re-encode on profile change), else null
 
   const playBtn = el("button", { textContent: "▶ Play" }) as HTMLButtonElement;
   const seek = el("input", { type: "range", min: "0", max: "1000", value: "0" }) as HTMLInputElement;
@@ -317,7 +318,7 @@ function decodeView() {
     transport.style.display = "";
     stats.textContent = `${label} ${(samples.length / fileRate).toFixed(1)}s — press play (or scrub to start anywhere)`;
   };
-  fileIn.onchange = async () => { const f = fileIn.files?.[0]; if (!f) return; clearReference(); loadWav(await f.arrayBuffer(), "loaded"); };
+  fileIn.onchange = async () => { const f = fileIn.files?.[0]; if (!f) return; loadedSampleIdx = null; clearReference(); loadWav(await f.arrayBuffer(), "loaded"); };
 
   // ── LIVE: realtime capture ──
   let liveCap: Capture | null = null;
@@ -405,30 +406,42 @@ function decodeView() {
 
   const profileSel = el("select") as HTMLSelectElement;
   PROFILES.forEach((p, i) => profileSel.append(el("option", { value: String(i), textContent: p.name, selected: i === decodeProfileIdx })));
-  profileSel.onchange = () => { decodeProfileIdx = parseInt(profileSel.value); Object.assign(s, PROFILES[decodeProfileIdx].settings); if (samples) reseek(0); render(); };
+  // Changing profile keeps the loaded audio and re-decodes in place (no full
+  // re-render, so nothing is lost). For a bundled sample we re-encode it under
+  // the new profile too — a tape only decodes with the profile it was made with,
+  // so this is how you view a sample through different profiles.
+  profileSel.onchange = () => {
+    decodeProfileIdx = parseInt(profileSel.value);
+    Object.assign(s, PROFILES[decodeProfileIdx].settings);
+    const fresh = settingsPanel(s, reapply, { hideSampleRate: true });
+    panel.replaceWith(fresh); panel = fresh;
+    if (loadedSampleIdx !== null) loadSampleTape().catch((e) => (warn.textContent = "Couldn't prepare sample: " + (e as Error).message));
+    else if (samples) reseek(0);
+  };
   const reapply = () => { if (samples) reseek(Math.floor(playhead)); };
+
+  // encode the selected bundled clip with the current profile, then decode+play it
+  async function loadSampleTape() {
+    const sm = SAMPLES[sampleIdx];
+    loadedSampleIdx = sampleIdx;
+    sourceMode = "file"; drawSrc();
+    stats.textContent = `Preparing "${sm.label}" (${PROFILES[decodeProfileIdx].name}) — encoding…`;
+    const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
+    const file = new File([blob], sm.file, { type: "video/mp4" });
+    const pv = PROFILES[decodeProfileIdx].video;
+    const video: VideoConfig = { width: pv.width, height: pv.height, fps: pv.fps, codec: CODECS["AV1 (best compression)"], gopSeconds: 2 };
+    const { wav } = await encodeFileToWav(file, s, video);
+    const buf = await wav.arrayBuffer();
+    setInputFile(fileIn, new File([buf], sm.file.replace(/\.mp4$/, ".wav"), { type: "audio/wav" }));
+    setReference(URL.createObjectURL(file)); // show the original beside the decode
+    loadWav(buf, `${sm.label} —`);
+    playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
+  }
 
   const sampleTapeNote = el("span", { className: "muted" });
   const sampleTapeSel = sampleSelect(sampleTapeNote);
   const sampleTapeBtn = el("button", { className: "secondary", textContent: "▶ Try a sample tape" }) as HTMLButtonElement;
-  sampleTapeBtn.onclick = async () => {
-    try {
-      const sm = SAMPLES[sampleIdx];
-      decodeProfileIdx = 1; Object.assign(s, PROFILES[1].settings); profileSel.value = "1"; // encode + decode with a known profile
-      sourceMode = "file"; drawSrc();
-      stats.textContent = `Preparing "${sm.label}" — encoding…`;
-      const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
-      const file = new File([blob], sm.file, { type: "video/mp4" });
-      const pv = PROFILES[1].video;
-      const video: VideoConfig = { width: pv.width, height: pv.height, fps: pv.fps, codec: CODECS["AV1 (best compression)"], gopSeconds: 2 };
-      const { wav } = await encodeFileToWav(file, s, video);
-      const buf = await wav.arrayBuffer();
-      setInputFile(fileIn, new File([buf], sm.file.replace(/\.mp4$/, ".wav"), { type: "audio/wav" }));
-      setReference(URL.createObjectURL(file)); // show the original beside the decode
-      loadWav(buf, `${sm.label} —`);
-      playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
-    } catch (e) { warn.textContent = "Couldn't prepare sample: " + (e as Error).message; }
-  };
+  sampleTapeBtn.onclick = () => loadSampleTape().catch((e) => (warn.textContent = "Couldn't prepare sample: " + (e as Error).message));
 
   const popBtn = el("button", { className: "secondary", textContent: "⧉ Pop out" });
   popBtn.onclick = async () => {
@@ -447,7 +460,7 @@ function decodeView() {
   const refBtn = el("button", { className: "secondary", textContent: "Compare with original…" });
   refBtn.onclick = () => refIn.click();
 
-  const panel = settingsPanel(s, reapply, { hideSampleRate: true });
+  let panel = settingsPanel(s, reapply, { hideSampleRate: true });
   app.append(
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(s, () => {}, () => render())]),
