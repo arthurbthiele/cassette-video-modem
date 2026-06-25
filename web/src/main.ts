@@ -161,7 +161,9 @@ function encodeView() {
       const rt = fit.fits ? `▶ fits the channel (audio ${(audioSecs / videoSecs).toFixed(2)}× video incl. lead-in)` : `⚠ ${(audioSecs / videoSecs).toFixed(2)}× — lower resolution/fps for real-time`;
       log.textContent = `Done. ${fit.container.length} B → ${audioSecs.toFixed(1)}s audio · ${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps · ${rt}`;
       audioEl.src = url; audioEl.style.display = "";
+      const src = videoFile!;
       result.append(
+        Object.assign(el("button", { textContent: "▶ Play it back" }), { onclick: () => { pendingDecode = { wav, sourceUrl: URL.createObjectURL(src), modem: { ...s }, profileIdx: encodeProfileIdx }; mode = "decode"; render(); } }),
         el("a", { className: "dl", href: url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
         Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(s, video, "cassette.cassette") }),
       );
@@ -197,11 +199,16 @@ function encodeView() {
 // ── DECODE ──────────────────────────────────────────────────────────────
 let decodeProfileIdx = 1; // module-level so re-renders don't reset the selection
 let decodeRaf = 0;
+// handoff from "Play it back" on the encode page: the just-encoded WAV plus the
+// source clip and the exact modem settings used, so decode matches and shows the original.
+let pendingDecode: { wav: Blob; sourceUrl: string; modem: ModemSettings; profileIdx: number } | null = null;
 
 function decodeView() {
   cancelAnimationFrame(decodeRaf);
+  if (pendingDecode) decodeProfileIdx = pendingDecode.profileIdx;
   const s: ModemSettings = { ...DEFAULT_SETTINGS };
   Object.assign(s, PROFILES[decodeProfileIdx].settings);
+  if (pendingDecode) Object.assign(s, pendingDecode.modem); // honour any hand-tweaks from the encoder
   let sourceMode: "file" | "live" = "file";
   let deviceId: string | undefined;
 
@@ -215,7 +222,8 @@ function decodeView() {
   const decodedCell = el("div", { className: "cmp-cell" }, [el("div", { className: "cmp-label", textContent: "Decoded from audio" }), canvas]);
   const originalCell = el("div", { className: "cmp-cell" }, [el("div", { className: "cmp-label", textContent: "Original" }), refVideo]);
   originalCell.style.display = "none"; // shown only once a reference video is set
-  const canvasHolder = el("div", { className: "panel cmp" }, [decodedCell, originalCell]);
+  const cmpRow = el("div", { className: "cmp" }, [decodedCell, originalCell]);
+  const canvasHolder = el("div", { className: "panel" }, [cmpRow]); // transport is appended below the videos
   const setReference = (src: string) => { refVideo.src = src; refVideo.currentTime = 0; originalCell.style.display = ""; };
   const clearReference = () => { refVideo.removeAttribute("src"); refVideo.load(); originalCell.style.display = "none"; };
   const stats = el("div", { className: "mono muted", textContent: "Load an audio file (or pick a device)." });
@@ -405,7 +413,6 @@ function decodeView() {
       el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(s, () => {}, () => render())]),
       srcRow,
       el("div", { className: "row" }, [sampleTapeBtn, el("span", { className: "muted", textContent: "one-click demo — the Encode tab's sample clip, already encoded to a tape, played back" })]),
-      transport,
       liveRow,
       el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
       panel,
@@ -413,6 +420,20 @@ function decodeView() {
     el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn, refBtn, refIn]), stats, warn, el("p", { className: "muted", textContent: "Signal (green = locked/decoding, amber = signal but no lock, grey = silent):" }), metersCanvas]),
     canvasHolder,
   );
+  canvasHolder.append(transport); // play bar sits below the two videos
+
+  // consume a "Play it back" handoff from the encode page: load that WAV + original and play
+  if (pendingDecode) {
+    const pd = pendingDecode; pendingDecode = null;
+    (async () => {
+      sourceMode = "file"; drawSrc();
+      const buf = await pd.wav.arrayBuffer();
+      setInputFile(fileIn, new File([buf], "cassette.wav", { type: "audio/wav" }));
+      setReference(pd.sourceUrl);
+      loadWav(buf, "your encoded clip —");
+      playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now();
+    })();
+  }
 }
 
 render();
