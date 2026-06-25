@@ -428,18 +428,15 @@ function decodeView() {
       f.close();
     }
     // The "Original" stays paused through the preamble, then starts at the first
-    // real decoded frame and plays smoothly — its rate gently nudged to track the
-    // decoder, so it stays aligned over a long clip without stepping frame-by-frame.
+    // real decoded frame and plays at true 1× — no rate-matching, so any gradual
+    // drift between the panes honestly shows whether the tape keeps up with
+    // real-time (decoded behind = too slow for the channel; ahead = headroom).
     if (refVideo.getAttribute("src") && refVideo.readyState >= 1) {
       const active = sourceMode === "file" && playing;
       if (!active) { if (!refVideo.paused) refVideo.pause(); }
       else if (decTs >= 0) {
-        if (!refSynced) { refVideo.currentTime = decTs; refVideo.playbackRate = 1; refVideo.play().catch(() => {}); refSynced = true; }
-        else {
-          const drift = refVideo.currentTime - decTs; // + = original ahead of the decoder
-          if (Math.abs(drift) > 0.5) refVideo.currentTime = decTs; // hard catch-up after a stall/seek
-          refVideo.playbackRate = Math.max(0.5, Math.min(1.5, 1 - drift));
-        }
+        if (!refSynced) { refVideo.currentTime = decTs; refSynced = true; }
+        if (refVideo.paused) refVideo.play().catch(() => {});
       }
     }
     const active = (sourceMode === "file" && playing) || liveOn;
