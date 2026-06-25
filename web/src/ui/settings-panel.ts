@@ -10,7 +10,7 @@ type Num = "sampleRate" | "fskBaud" | "fskF0" | "fskF1" | "fsk4Baud" | "fsk4F0" 
   "ofdmPilotInterval" | "ofdmPhases" | "constantPowerCarrierHz" | "rsNsym" | "blockDataSize";
 type Bool = "constantPower" | "preEmphasis" | "reedSolomon";
 
-export function settingsPanel(s: ModemSettings, onChange: () => void): HTMLElement {
+export function settingsPanel(s: ModemSettings, onChange: () => void, opts: { hideSampleRate?: boolean } = {}): HTMLElement {
   const root = el("div");
 
   const rebuild = () => {
@@ -34,10 +34,12 @@ export function settingsPanel(s: ModemSettings, onChange: () => void): HTMLEleme
       c.onchange = () => { (s[key] as boolean) = c.checked; onChange(); rebuild(); };
       return el("div", { className: "row" }, [el("label", { textContent: label }), c]);
     };
-    const srSel = el("select") as HTMLSelectElement;
-    for (const r of [44100, 48000]) srSel.append(el("option", { value: String(r), textContent: String(r), selected: s.sampleRate === r }));
-    srSel.onchange = () => { s.sampleRate = parseInt(srSel.value); onChange(); };
-    root.append(el("div", { className: "row" }, [el("label", { textContent: "Sample rate" }), srSel]));
+    if (!opts.hideSampleRate) {
+      const srSel = el("select") as HTMLSelectElement;
+      for (const r of [44100, 48000]) srSel.append(el("option", { value: String(r), textContent: String(r), selected: s.sampleRate === r }));
+      srSel.onchange = () => { s.sampleRate = parseInt(srSel.value); onChange(); };
+      root.append(el("div", { className: "row" }, [el("label", { textContent: "Sample rate" }), srSel]));
+    }
 
     if (s.method === "fsk") root.append(num("FSK baud", "fskBaud", 100), num("FSK freq 0 (Hz)", "fskF0", 100), num("FSK freq 1 (Hz)", "fskF1", 100));
     if (s.method === "fsk4") root.append(num("4-FSK baud", "fsk4Baud", 100), num("Freq 0", "fsk4F0", 100), num("Freq 1", "fsk4F1", 100), num("Freq 2", "fsk4F2", 100), num("Freq 3", "fsk4F3", 100));

@@ -2,18 +2,7 @@
 // processing (AGC, noise suppression, echo cancellation) DISABLED — essential
 // for a modem. Forwards sample blocks via onChunk. Browser-only.
 
-// Worklet runs in the audio render thread; loaded from a Blob URL to avoid
-// bundler-specific AudioWorklet handling. It just forwards each input block.
-const WORKLET_SRC = `
-class CaptureProcessor extends AudioWorkletProcessor {
-  process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
-    if (ch && ch.length) this.port.postMessage(ch.slice());
-    return true;
-  }
-}
-registerProcessor("capture-processor", CaptureProcessor);
-`;
+import { addCaptureWorklet } from "./worklet";
 
 export interface InputDevice {
   deviceId: string;
@@ -45,9 +34,7 @@ export class Capture {
     });
     this.ctx = new AudioContext();
     this.sampleRate = this.ctx.sampleRate;
-    const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
-    await this.ctx.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
+    await addCaptureWorklet(this.ctx);
     const source = this.ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.ctx, "capture-processor");
     this.node.port.onmessage = (e) => onChunk(e.data as Float32Array);
