@@ -21,6 +21,9 @@ VIDEO ─encode─▶ bytes ─frame+RS─▶ modulate ─▶ WAV ─▶ [tape] 
 
 **▶ Live: https://arthurbthiele.github.io/cassette-video-modem/** (Chrome/Edge — uses WebCodecs)
 
+New here? **[`docs/manual/`](docs/manual/README.md)** is a screenshot walkthrough of the
+encode → decode loop, captured from the live site — what works, step by step.
+
 Or run locally:
 ```
 cd web
@@ -65,5 +68,6 @@ for the full history, verified status, and open questions.
 | `web/` | Browser/TypeScript app (primary) |
 | `python/` | Reference implementation (DSP core, GUIs, channel simulator, tests) |
 | `browser-spike/` | Throwaway feasibility spike (WebCodecs + DSP timing) |
+| `docs/manual/` | Screenshot walkthrough of the encode → decode loop (from the live site) |
 | `docs/original-brief.md` | skamlox's original project brief & research notes |
 | `HANDOVER.md` | What changed and why; verified status; open questions |
