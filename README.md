@@ -18,7 +18,10 @@ VIDEO ─encode─▶ bytes ─frame+RS─▶ modulate ─▶ WAV ─▶ [tape] 
 | **`python/`** | The original Python + tkinter implementation. | Working; the **reference** the web port is validated against |
 
 ### The web app
-Open it (hosted) or run locally:
+
+**▶ Live: https://arthurbthiele.github.io/cassette-video-modem/** (Chrome/Edge — uses WebCodecs)
+
+Or run locally:
 ```
 cd web
 npm install
