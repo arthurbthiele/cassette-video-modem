@@ -1,7 +1,7 @@
 // Top-level modem: method dispatch, preamble, constant-power/pilot, the full
 // encode-stream builder, and OFDM symbol-timing recovery.
 
-import { ModemSettings, TRAIN_BYTES, METADATA_SEQ } from "./settings";
+import { ModemSettings, TRAIN_BYTES } from "./settings";
 import { frameBlock } from "./framing";
 import { modulateFsk, demodulateFsk } from "./fsk";
 import { modulateFsk4, demodulateFsk4 } from "./fsk4";
@@ -94,7 +94,7 @@ export function ofdmTimingOffset(audio: Float64Array, s: ModemSettings, minConfi
   const hp = lfilter(b, a, audio).y;
   const nsym = Math.floor((hp.length - N - CP) / SL);
   if (nsym < 2) return null;
-  if (dot(hp, hp, 0, hp.length) < 1e-4 * hp.length) return null;
+  if (energy(hp, 0, hp.length) < 1e-4 * hp.length) return null;
   const scores = new Float64Array(SL);
   for (let d = 0; d < SL; d++) {
     let num = 0;
@@ -124,39 +124,17 @@ export function ofdmTimingOffset(audio: Float64Array, s: ModemSettings, minConfi
   const median = sorted[sorted.length >> 1] + 1e-9;
   return best >= minConfidence && best >= 1.4 * median ? bestD : null;
 }
-function dot(a: Float64Array, _b: Float64Array, start: number, end: number): number {
+function energy(a: Float64Array, start: number, end: number): number {
   let s = 0;
   for (let i = start; i < end; i++) s += a[i] * a[i];
   return s;
 }
 
-// ── metadata block ──────────────────────────────────────────────────────
-export function encodeMetadataBlock(vset: Record<string, unknown>, s: ModemSettings): Uint8Array {
-  const json = JSON.stringify({ _type: "cassette-meta", _version: 2, video: vset, method: s.method, sr: s.sampleRate });
-  let payload = new TextEncoder().encode(json);
-  if (payload.length > s.blockDataSize) payload = payload.subarray(0, s.blockDataSize);
-  const padded = new Uint8Array(s.blockDataSize);
-  padded.set(payload, 0); // zero-padded
-  return frameBlock(padded, METADATA_SEQ, s.reedSolomon, s.rsNsym);
-}
-
-export function decodeMetadataPayload(payload: Uint8Array): Record<string, unknown> | null {
-  try {
-    let end = payload.length;
-    while (end > 0 && payload[end - 1] === 0) end--; // strip trailing NULs
-    const obj = JSON.parse(new TextDecoder().decode(payload.subarray(0, end)));
-    return obj && obj._type === "cassette-meta" ? obj : null;
-  } catch {
-    return null;
-  }
-}
-
 // ── full encode stream (mirror of Python encode_to_wav's signal build) ──
-export function encodeStream(videoBytes: Uint8Array, s: ModemSettings, vset?: Record<string, unknown>): Float64Array {
+export function encodeStream(videoBytes: Uint8Array, s: ModemSettings): Float64Array {
   const bs = s.blockDataSize;
   const nBlocks = Math.ceil(videoBytes.length / bs) || 1;
   const parts: Uint8Array[] = [TRAIN_BYTES];
-  if (vset) parts.push(encodeMetadataBlock(vset, s));
   for (let i = 0; i < nBlocks; i++) {
     const chunk = new Uint8Array(bs);
     chunk.set(videoBytes.subarray(i * bs, Math.min((i + 1) * bs, videoBytes.length)), 0);

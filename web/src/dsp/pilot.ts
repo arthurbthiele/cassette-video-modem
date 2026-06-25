@@ -6,13 +6,6 @@
 
 import { butter, filtfilt, notchBiquad } from "./filters";
 
-export function addPilotToneTo(audio: Float64Array, sampleRate: number, pilotHz: number, amp: number): Float64Array {
-  const out = new Float64Array(audio.length);
-  const w = (2 * Math.PI * pilotHz) / sampleRate;
-  for (let i = 0; i < audio.length; i++) out[i] = audio[i] + amp * Math.sin(w * i);
-  return out;
-}
-
 export function pilotResample(audio: Float32Array | Float64Array, sampleRate: number, pilotHz: number): Float32Array {
   const n = audio.length;
   const w = (2 * Math.PI * pilotHz) / sampleRate;

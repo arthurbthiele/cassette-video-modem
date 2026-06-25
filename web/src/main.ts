@@ -45,7 +45,7 @@ const freshVideo = (i: number): VideoConfig => ({ width: PROFILES[i].video.width
 
 // ── the single source of truth ──────────────────────────────────────────
 interface DecodeInput { wav: Blob; name: string; referenceUrl: string | null; sampleIdx: number | null }
-interface Encoding { wav: Blob; sourceUrl: string; modem: ModemSettings; video: VideoConfig; profileIdx: number; summary: string }
+interface Encoding { wav: Blob; url: string; sourceUrl: string; modem: ModemSettings; video: VideoConfig; profileIdx: number; summary: string }
 const state = {
   tab: "encode" as "encode" | "decode",
   sampleIdx: 0,
@@ -66,6 +66,15 @@ const state = {
 };
 let decodeAutoplay = false; // one-shot: "Play it back" wants the next decode render to auto-play
 let decodeRaf = 0;
+let teardownDecode: (() => void) | null = null; // stops the live decode view's loop/mic/decoder on re-render
+const WEBCODECS_OK = typeof VideoEncoder !== "undefined" && typeof VideoDecoder !== "undefined";
+
+// Replace the stored encoding, revoking the previous one's object URLs (the WAV
+// URL is otherwise re-minted on every encode-view render → an unbounded leak).
+function setEncoding(enc: Encoding | null): void {
+  if (state.encoding) { URL.revokeObjectURL(state.encoding.url); URL.revokeObjectURL(state.encoding.sourceUrl); }
+  state.encoding = enc;
+}
 
 // Encode a video File to a modem WAV with the given settings — shared by the
 // encoder and by the decoder's "Try a sample tape" (which encodes on the fly so
@@ -75,7 +84,7 @@ async function encodeFileToWav(file: File, s: ModemSettings, video: VideoConfig,
   const nFrames = frames.length;
   const fit = await encodeToFitChannel(frames, { codec: video.codec, width: video.width, height: video.height, framerate: video.fps, gopSeconds: video.gopSeconds }, videoBitrateBudget(s, { fillFactor: 0.9 }), netBitsPerSec(s));
   frames.forEach((f) => f.close());
-  const audio = Float32Array.from(encodeStream(fit.container, s, { width: video.width, height: video.height, fps: video.fps, codec: video.codec }));
+  const audio = Float32Array.from(encodeStream(fit.container, s));
   return { wav: encodeWav(audio, s.sampleRate), fit, audioSecs: audio.length / s.sampleRate, videoSecs: nFrames / video.fps };
 }
 
@@ -115,11 +124,15 @@ function loadConfigButton(): HTMLElement {
 }
 
 function render() {
+  teardownDecode?.(); teardownDecode = null; // tear down the previous decode instance (loop, mic, decoder)
   app.innerHTML = "";
   app.append(
     el("h1", { textContent: "Cassette Video Modem" }),
     el("p", { className: "sub", textContent: "Store video as audio on cassette tape (or any audio medium) and play it back." }),
   );
+  if (!WEBCODECS_OK) app.append(el("div", { className: "panel", style: "border-color:#f5a623" }, [
+    el("p", { textContent: "⚠ This tool needs Chrome or Edge. Your browser doesn't support the video features (WebCodecs) it relies on, so encoding and decoding won't work here." }),
+  ]));
   const tabs = el("div", { className: "tabs" });
   for (const m of ["encode", "decode"] as const) {
     const t = el("div", { className: "tab" + (state.tab === m ? " active" : ""), textContent: m === "encode" ? "Encode" : "Decode" });
@@ -151,7 +164,7 @@ function encodeView() {
     E.profileIdx = parseInt(profileSel.value);
     E.settings = freshSettings(E.profileIdx); // choosing a preset loads its settings
     E.video = freshVideo(E.profileIdx);
-    if (E.sourceAspect > 0) E.video.height = Math.max(8, Math.round((E.video.width * E.sourceAspect) / 8) * 8);
+    if (E.sourceAspect > 0) E.video.height = Math.max(64, Math.round((E.video.width * E.sourceAspect) / 8) * 8);
     render();
   };
 
@@ -176,7 +189,7 @@ function encodeView() {
     probe.onloadedmetadata = () => {
       if (probe.videoWidth && probe.videoHeight) {
         E.sourceAspect = probe.videoHeight / probe.videoWidth;
-        video.height = Math.max(8, Math.round((video.width * E.sourceAspect) / 8) * 8); // match source aspect (×8)
+        video.height = Math.max(64, Math.round((video.width * E.sourceAspect) / 8) * 8); // match source aspect (×8, ≥ codec min)
         heightInput.value = String(video.height);
         updateBudget();
       }
@@ -216,8 +229,7 @@ function encodeView() {
     audioEl.style.display = "none";
     const enc = state.encoding;
     if (!enc) return;
-    const url = URL.createObjectURL(enc.wav);
-    audioEl.src = url; audioEl.style.display = "";
+    audioEl.src = enc.url; audioEl.style.display = "";
     log.textContent = enc.summary;
     result.append(
       Object.assign(el("button", { textContent: "▶ Play it back" }), {
@@ -227,25 +239,28 @@ function encodeView() {
           state.tab = "decode"; decodeAutoplay = true; render();
         },
       }),
-      el("a", { className: "dl", href: url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
+      el("a", { className: "dl", href: enc.url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
       Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(enc.modem, enc.video, "cassette.cassette") }),
     );
   };
 
   const runEncode = async () => {
     if (!E.sourceFile) { log.textContent = "Choose a video file first."; return; }
-    if (video.width < 96 || video.height < 64) { log.textContent = "Resolution too small to decode reliably — use at least 96×64 (the video codec has a minimum)."; return; }
+    if (video.width < 96 || video.height < 64) { log.textContent = "Picture too small to decode reliably — needs at least 96×64. Pick a less extreme aspect ratio or a roomier profile."; return; }
     encodeBtn.disabled = true;
     result.innerHTML = "";
     audioEl.style.display = "none";
     try {
       log.textContent = "Reading video frames…";
       const { wav, fit, audioSecs, videoSecs } = await encodeFileToWav(E.sourceFile, s, video, (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`));
-      const rt = fit.fits ? `▶ fits the channel (audio ${(audioSecs / videoSecs).toFixed(2)}× video incl. lead-in)` : `⚠ ${(audioSecs / videoSecs).toFixed(2)}× — lower resolution/fps for real-time`;
+      const ratio = (audioSecs / videoSecs).toFixed(2);
+      const rt = fit.fits
+        ? `▶ fits the channel — plays back in real time (audio ${ratio}× the video).`
+        : `⚠ too detailed to play from tape in real time (audio ${ratio}× the video). Use a smaller picture / lower frame rate, or a calmer clip — it still decodes correctly when you scrub.`;
       const summary = `Done. ${fit.container.length} B → ${audioSecs.toFixed(1)}s audio · ${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps · ${rt}`;
       // record the encoding and point the Decode tab at it (encode output = decode input)
-      state.encoding = { wav, sourceUrl: URL.createObjectURL(E.sourceFile), modem: { ...s }, video: { ...video }, profileIdx: E.profileIdx, summary };
-      state.decode.input = { wav, name: "cassette.wav", referenceUrl: state.encoding.sourceUrl, sampleIdx: null };
+      setEncoding({ wav, url: URL.createObjectURL(wav), sourceUrl: URL.createObjectURL(E.sourceFile), modem: { ...s }, video: { ...video }, profileIdx: E.profileIdx, summary });
+      state.decode.input = { wav, name: "cassette.wav", referenceUrl: state.encoding!.sourceUrl, sampleIdx: null };
       state.decode.profileIdx = E.profileIdx; state.decode.settings = { ...s }; state.decode.sourceMode = "file";
       showResult();
     } catch (e) {
@@ -259,8 +274,9 @@ function encodeView() {
   const panel = settingsPanel(s, updateBudget);
   app.append(
     el("div", { className: "panel" }, [
-      el("div", { className: "row" }, [el("label", { textContent: "Target device" }), profileSel, loadConfigButton()]),
-      el("p", { className: "muted", textContent: profile.description }),
+      el("p", { className: "muted", textContent: "Turn a video into audio you can record onto tape: pick a clip (or a sample), press ENCODE, then download the WAV. To watch it back, open the Decode tab." }),
+      el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton()]),
+      el("p", { className: "muted", textContent: `${profile.description} The decoder must use this same profile.` }),
     ]),
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn]),
@@ -282,7 +298,6 @@ function encodeView() {
 
 // ── DECODE ──────────────────────────────────────────────────────────────
 function decodeView() {
-  cancelAnimationFrame(decodeRaf);
   const D = state.decode;
   const s = D.settings; // mutate-in-place → persists
   let sourceMode = D.sourceMode;
@@ -336,6 +351,7 @@ function decodeView() {
   let loadedSampleIdx: number | null = D.input?.sampleIdx ?? null;
   let decTs = -1;          // content time (s) of the latest decoded frame; -1 = none yet
   let refSynced = false;   // has the "Original" been started for the current play segment
+  let preparing = false;   // true while a sample is being (re)encoded on the fly
 
   const playBtn = el("button", { textContent: "▶ Play" }) as HTMLButtonElement;
   const seek = el("input", { type: "range", min: "0", max: "1000", value: "0" }) as HTMLInputElement;
@@ -355,20 +371,19 @@ function decodeView() {
   seek.oninput = () => { if (samples) reseek(Math.floor((parseInt(seek.value) / 1000) * samples.length)); };
 
   const fileIn = el("input", { type: "file", accept: "audio/wav,.wav" }) as HTMLInputElement;
-  const loadWav = (buf: ArrayBuffer, label: string) => {
+  const loadWav = (buf: ArrayBuffer) => {
     warn.textContent = "";
     const dec = decodeWav(buf);
     samples = dec.samples; fileRate = dec.sampleRate;
     reseek(0); playing = false; playBtn.textContent = "▶ Play";
-    transport.style.display = "";
-    stats.textContent = `${label} ${(samples.length / fileRate).toFixed(1)}s — press play (or scrub to start anywhere)`;
+    transport.style.display = ""; // status is shown by the loop ("Ready — press Play" / "Decoding…")
   };
   fileIn.onchange = async () => {
     const f = fileIn.files?.[0];
     if (!f) return;
     D.input = { wav: f, name: f.name, referenceUrl: null, sampleIdx: null };
     loadedSampleIdx = null; clearReference();
-    loadWav(await f.arrayBuffer(), "loaded");
+    loadWav(await f.arrayBuffer());
   };
 
   // ── LIVE: realtime capture ──
@@ -388,7 +403,7 @@ function decodeView() {
   const liveStart = el("button", { textContent: "▶ Start" }) as HTMLButtonElement;
   const liveStop = el("button", { className: "secondary", textContent: "■ Stop" }) as HTMLButtonElement;
   liveStart.onclick = async () => {
-    liveCap?.stop();
+    stopAll();
     const cap = new Capture(); liveCap = cap; liveOn = true;
     try { await cap.start(deviceId, (() => { buildPipeline(cap.sampleRate); return (smp: Float32Array) => { meters.push(smp); for (const b of ds!.feedAudio(smp)) handle(b.seq, b.payload); }; })()); }
     catch (e) { liveCap = null; liveOn = false; warn.textContent = "Input error: " + (e as Error).message; }
@@ -439,12 +454,19 @@ function decodeView() {
         if (refVideo.paused) refVideo.play().catch(() => {});
       }
     }
-    const active = (sourceMode === "file" && playing) || liveOn;
     meters.draw(metersCanvas, blocks > 0);
-    stats.textContent = `blocks: ${blocks}` + (active && blocks === 0 && fed > fileRate ? "  ·  no data — check the profile/settings match the encoder" : "");
+    if (!preparing) {
+      if (blocks > 0) stats.textContent = `Decoding — ${blocks} chunk${blocks === 1 ? "" : "s"} recovered.`;
+      else if (sourceMode === "file" && samples && fed > 2 * fileRate) stats.textContent = "No picture yet — if this is your own recording, make sure the Profile matches the one used to encode it (or Load its .cassette config).";
+      else if (liveOn) stats.textContent = "Listening for a signal…";
+      else if (sourceMode === "file" && samples) stats.textContent = "Ready — press ▶ Play.";
+    }
     decodeRaf = requestAnimationFrame(loop);
   }
   decodeRaf = requestAnimationFrame(loop);
+  // tear-down hook used by render() when leaving/refreshing this view, so the
+  // loop, mic capture and video decoder don't leak when you switch tabs.
+  teardownDecode = () => { cancelAnimationFrame(decodeRaf); liveCap?.stop(); liveCap = null; liveOn = false; if (vdec) { vdec.close(); vdec = null; } while (frameQueue.length) frameQueue.shift()!.close(); };
 
   // ── source toggle + profile + config ──
   const srcRow = el("div", { className: "row" });
@@ -483,19 +505,21 @@ function decodeView() {
     const sm = SAMPLES[state.sampleIdx];
     loadedSampleIdx = state.sampleIdx;
     sourceMode = "file"; D.sourceMode = "file"; drawSrc();
+    preparing = true;
     stats.textContent = `Preparing "${sm.label}" (${PROFILES[D.profileIdx].name}) — encoding…`;
-    const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
-    const file = new File([blob], sm.file, { type: "video/mp4" });
-    const pv = PROFILES[D.profileIdx].video;
-    const v: VideoConfig = { width: pv.width, height: pv.height, fps: pv.fps, codec: AV1, gopSeconds: 2 };
-    const { wav } = await encodeFileToWav(file, s, v);
-    const buf = await wav.arrayBuffer();
-    const referenceUrl = URL.createObjectURL(file);
-    D.input = { wav, name: sm.file.replace(/\.mp4$/, ".wav"), referenceUrl, sampleIdx: state.sampleIdx };
-    setInputFile(fileIn, new File([buf], D.input.name, { type: "audio/wav" }));
-    setReference(referenceUrl);
-    loadWav(buf, `${sm.label} —`);
-    playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
+    try {
+      const blob = await (await fetch(`${SAMPLE_BASE}${sm.file}`)).blob();
+      const file = new File([blob], sm.file, { type: "video/mp4" });
+      const { wav } = await encodeFileToWav(file, s, freshVideo(D.profileIdx));
+      const buf = await wav.arrayBuffer();
+      const referenceUrl = URL.createObjectURL(file);
+      if (D.input?.referenceUrl && D.input.referenceUrl !== state.encoding?.sourceUrl) URL.revokeObjectURL(D.input.referenceUrl);
+      D.input = { wav, name: sm.file.replace(/\.mp4$/, ".wav"), referenceUrl, sampleIdx: state.sampleIdx };
+      setInputFile(fileIn, new File([buf], D.input.name, { type: "audio/wav" }));
+      setReference(referenceUrl);
+      loadWav(buf);
+      playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
+    } finally { preparing = false; }
   }
 
   const sampleTapeNote = el("span", { className: "muted" });
@@ -528,7 +552,7 @@ function decodeView() {
       el("div", { className: "row" }, [el("label", { textContent: "Sample tape" }), sampleTapeSel, sampleTapeBtn]),
       el("div", { className: "row" }, [sampleTapeNote]),
       liveRow,
-      el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
+      el("p", { className: "muted", textContent: "Decode a tape back to video. The Profile must match the one it was encoded with (or Load its .cassette config); then choose the WAV and press Play — it decodes in real time, and you can scrub to start anywhere." }),
       panel,
     ]),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn, refBtn, refIn]), stats, warn, el("p", { className: "muted", textContent: "Signal (green = locked/decoding, amber = signal but no lock, grey = silent):" }), metersCanvas]),
@@ -543,7 +567,7 @@ function decodeView() {
     setInputFile(fileIn, new File([inp.wav], inp.name, { type: "audio/wav" }));
     if (inp.referenceUrl) setReference(inp.referenceUrl);
     (async () => {
-      loadWav(await inp.wav.arrayBuffer(), inp.sampleIdx !== null ? `${SAMPLES[inp.sampleIdx].label} —` : "loaded");
+      loadWav(await inp.wav.arrayBuffer());
       if (wantAutoplay) { playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); }
     })();
   }

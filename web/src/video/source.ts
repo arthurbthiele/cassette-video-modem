@@ -29,7 +29,7 @@ export async function framesFromFile(file: File, opts: FrameSourceOptions): Prom
   const dur = video.duration;
   const dt = 1 / opts.fps;
 
-  // Seek-and-grab: deterministic and avoids realtime-playback timing j.
+  // Seek-and-grab: deterministic and avoids realtime-playback timing jitter.
   for (let t = 0, i = 0; t < dur; t += dt, i++) {
     await seek(video, t);
     if (opts.grayscale) ctx.filter = "grayscale(1)"; else ctx.filter = "none";

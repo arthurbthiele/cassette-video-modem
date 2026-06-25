@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import vectors from "./vectors.json";
 import { DEFAULT_SETTINGS, METADATA_SEQ, ModemSettings, Method } from "../src/dsp/settings";
-import { encodeStream, decodeMetadataPayload } from "../src/dsp/modem";
+import { encodeStream } from "../src/dsp/modem";
 import { DecoderState } from "../src/dsp/decoderState";
 
 function decodeAll(audio: Float64Array, s: ModemSettings): Map<number, Uint8Array> {
@@ -9,7 +9,7 @@ function decodeAll(audio: Float64Array, s: ModemSettings): Map<number, Uint8Arra
   const data = new Map<number, Uint8Array>();
   for (let i = 0; i < audio.length; i += 4096) {
     for (const blk of ds.feedAudio(audio.subarray(i, i + 4096))) {
-      if (blk.seq !== METADATA_SEQ) data.set(blk.seq, blk.payload);
+      if (blk.seq !== METADATA_SEQ) data.set(blk.seq, blk.payload); // Python vectors still carry a metadata block
     }
   }
   return data;
@@ -31,7 +31,7 @@ describe("full modem round-trip (TS encode → streaming decode)", () => {
     it(`${method}: recovers the payload bit-exact`, () => {
       const s: ModemSettings = { ...DEFAULT_SETTINGS, method };
       const payload = Uint8Array.from({ length: 300 }, (_, i) => (i * 37) % 256);
-      const audio = encodeStream(payload, s, { width: 256, height: 144, fps: 15 });
+      const audio = encodeStream(payload, s);
       const data = decodeAll(audio, s);
       expect(Array.from(reassemble(data, s.blockDataSize, payload.length))).toEqual(Array.from(payload));
     });
@@ -57,21 +57,5 @@ describe("cross-validation: TS decodes Python-encoded OFDM audio", () => {
     const audio = Float64Array.from(v.audio);
     const data = decodeAll(audio, s);
     expect(Array.from(reassemble(data, s.blockDataSize, v.payload.length))).toEqual(v.payload);
-  });
-});
-
-describe("metadata", () => {
-  it("decodeMetadataPayload reads the encoded video params", () => {
-    const s: ModemSettings = { ...DEFAULT_SETTINGS, method: "fsk" };
-    const audio = encodeStream(Uint8Array.from({ length: 64 }, (_, i) => i), s, { width: 256, height: 144, fps: 15 });
-    const ds = new DecoderState(s);
-    let meta: Record<string, unknown> | null = null;
-    for (let i = 0; i < audio.length; i += 4096) {
-      for (const blk of ds.feedAudio(audio.subarray(i, i + 4096))) {
-        if (blk.seq === METADATA_SEQ) meta = decodeMetadataPayload(blk.payload);
-      }
-    }
-    expect(meta).not.toBeNull();
-    expect((meta!.video as any).width).toBe(256);
   });
 });

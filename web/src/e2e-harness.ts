@@ -44,7 +44,7 @@ async function runProfile(name: string, settings: Partial<ModemSettings>, video:
   const fit = await encodeToFitChannel(frames, { codec: CODEC, width: video.width, height: video.height, framerate: video.fps, gopSeconds: 1 }, videoBitrateBudget(s, { fillFactor: 0.9 }), netBitsPerSec(s));
   frames.forEach((f) => f.close());
 
-  const audio = Float32Array.from(encodeStream(fit.container, s, { width: video.width, height: video.height, fps: video.fps }));
+  const audio = Float32Array.from(encodeStream(fit.container, s));
   const wav = encodeWav(audio, s.sampleRate);
   const clean = decodeWav(await wav.arrayBuffer()).samples;
 

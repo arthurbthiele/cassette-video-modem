@@ -39,7 +39,7 @@ async function run() {
   frames.forEach((f) => f.close());
   const container = fit.container;
 
-  const audio = encodeStream(container, s, { width: W, height: H, fps: FPS });
+  const audio = encodeStream(container, s);
 
   // Go through the WAV round-trip exactly like the UI's file path.
   const wavBlob = encodeWav(Float32Array.from(audio), s.sampleRate);
