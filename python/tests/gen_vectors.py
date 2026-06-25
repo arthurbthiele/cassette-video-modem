@@ -15,7 +15,8 @@ from cassette_modem import (ModemSettings, bytes_to_bits, _crc32,
                             modulate_dpsk, demodulate_dpsk,
                             modulate_ofdm, demodulate_ofdm,
                             _rs_encode, _ofdm_carriers,
-                            generate_preamble, encode_metadata_block, TRAIN_BYTES)
+                            generate_preamble, encode_metadata_block, TRAIN_BYTES,
+                            calculate_bitrate)
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT  = os.path.join(REPO, "web", "tests", "vectors.json")
@@ -132,6 +133,22 @@ v["ofdmE2E"] = {
     "payload": list(payload),
     "audio": [round(float(x), 7) for x in audio],
 }
+
+# ── bitrate (validate net/raw bps vs Python calculate_bitrate) ──────────
+v["bitrate"] = {}
+for name, s in {
+    "ofdm_default": ModemSettings(method="ofdm"),
+    "fsk_default": ModemSettings(method="fsk"),
+    "fsk4_default": ModemSettings(method="fsk4"),
+    "dpsk_default": ModemSettings(method="dpsk"),
+    "ofdm_nors": ModemSettings(method="ofdm", reed_solomon=False),
+}.items():
+    br = calculate_bitrate(s)
+    v["bitrate"][name] = {
+        "method": s.method, "reedSolomon": s.reed_solomon, "rsNsym": s.rs_nsym,
+        "blockDataSize": s.block_data_size,
+        "rawBps": br["raw_bps"], "netBps": br["net_bps"],
+    }
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with open(OUT, "w") as f:
