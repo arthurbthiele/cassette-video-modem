@@ -210,7 +210,14 @@ function decodeView() {
   metersCanvas.style.cssText = "width:100%;max-width:512px;border:1px solid #2c3038;border-radius:6px";
   const canvas = el("canvas", { id: "screen", width: 160, height: 120 }) as HTMLCanvasElement;
   const ctx2d = canvas.getContext("2d")!;
-  const canvasHolder = el("div", { className: "panel" }, [canvas]);
+  const refVideo = el("video", { className: "ref" }) as HTMLVideoElement;
+  refVideo.muted = true; (refVideo as any).playsInline = true;
+  const decodedCell = el("div", { className: "cmp-cell" }, [el("div", { className: "cmp-label", textContent: "Decoded from audio" }), canvas]);
+  const originalCell = el("div", { className: "cmp-cell" }, [el("div", { className: "cmp-label", textContent: "Original" }), refVideo]);
+  originalCell.style.display = "none"; // shown only once a reference video is set
+  const canvasHolder = el("div", { className: "panel cmp" }, [decodedCell, originalCell]);
+  const setReference = (src: string) => { refVideo.src = src; refVideo.currentTime = 0; originalCell.style.display = ""; };
+  const clearReference = () => { refVideo.removeAttribute("src"); refVideo.load(); originalCell.style.display = "none"; };
   const stats = el("div", { className: "mono muted", textContent: "Load an audio file (or pick a device)." });
   const warn = el("div", { className: "muted" });
 
@@ -270,7 +277,7 @@ function decodeView() {
     transport.style.display = "";
     stats.textContent = `${label} ${(samples.length / fileRate).toFixed(1)}s — press play (or scrub to start anywhere)`;
   };
-  fileIn.onchange = async () => { const f = fileIn.files?.[0]; if (f) loadWav(await f.arrayBuffer(), "loaded"); };
+  fileIn.onchange = async () => { const f = fileIn.files?.[0]; if (!f) return; clearReference(); loadWav(await f.arrayBuffer(), "loaded"); };
 
   // ── LIVE: realtime capture ──
   let liveCap: Capture | null = null;
@@ -319,6 +326,16 @@ function decodeView() {
       seek.value = String(Math.floor((playhead / samples.length) * 1000));
       timeLabel.textContent = `${(playhead / fileRate).toFixed(1)}s`;
     }
+    // mirror the transport onto the "Original" reference video, and nudge it
+    // back into sync if it drifts (covers play/pause, end, and scrubbing)
+    if (refVideo.getAttribute("src")) {
+      if (sourceMode === "file" && playing) { if (refVideo.paused) refVideo.play().catch(() => {}); }
+      else if (!refVideo.paused) refVideo.pause();
+      if (samples && refVideo.duration) {
+        const targ = (playhead / samples.length) * refVideo.duration;
+        if (Math.abs(refVideo.currentTime - targ) > 0.35) refVideo.currentTime = targ;
+      }
+    }
     while (frameQueue.length > 1) frameQueue.shift()!.close();
     const f = frameQueue.shift();
     if (f) { if (canvas.width !== f.displayWidth) canvas.width = f.displayWidth; if (canvas.height !== f.displayHeight) canvas.height = f.displayHeight; ctx2d.drawImage(f, 0, 0); f.close(); }
@@ -359,6 +376,7 @@ function decodeView() {
       sourceMode = "file"; drawSrc();
       const buf = await (await fetch(`${SAMPLE_BASE}gradient.wav`)).arrayBuffer();
       setInputFile(fileIn, new File([buf], "gradient.wav", { type: "audio/wav" })); // show "gradient.wav" in the input
+      setReference(`${SAMPLE_BASE}gradient.mp4`); // show the source clip beside the decode
       loadWav(buf, "sample tape —");
       playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
     } catch (e) { warn.textContent = "Couldn't load sample: " + (e as Error).message; }
@@ -371,8 +389,15 @@ function decodeView() {
     const win = await dpip.requestWindow({ width: 512, height: 288 });
     win.document.body.style.cssText = "margin:0;background:#000;display:grid;place-items:center";
     win.document.body.append(canvas);
-    win.addEventListener("pagehide", () => canvasHolder.append(canvas));
+    win.addEventListener("pagehide", () => decodedCell.append(canvas));
   };
+
+  // optional: show any video beside the decode output, for your own WAVs
+  const refIn = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
+  refIn.style.display = "none";
+  refIn.onchange = () => { const f = refIn.files?.[0]; if (f) setReference(URL.createObjectURL(f)); };
+  const refBtn = el("button", { className: "secondary", textContent: "Compare with original…" });
+  refBtn.onclick = () => refIn.click();
 
   const panel = settingsPanel(s, reapply, { hideSampleRate: true });
   app.append(
@@ -385,7 +410,7 @@ function decodeView() {
       el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
       panel,
     ]),
-    el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn]), stats, warn, el("p", { className: "muted", textContent: "Signal (green = locked/decoding, amber = signal but no lock, grey = silent):" }), metersCanvas]),
+    el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn, refBtn, refIn]), stats, warn, el("p", { className: "muted", textContent: "Signal (green = locked/decoding, amber = signal but no lock, grey = silent):" }), metersCanvas]),
     canvasHolder,
   );
 }

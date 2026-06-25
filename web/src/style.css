@@ -22,6 +22,11 @@ button.secondary { background: var(--panel); color: var(--ink); border: 1px soli
 button:disabled { opacity: 0.5; cursor: default; }
 select, input[type=number], input[type=range] { background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
 canvas#screen { width: 100%; max-width: 512px; image-rendering: pixelated; background: #000; border: 1px solid var(--line); border-radius: 8px; display: block; }
+.cmp { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.cmp-cell { flex: 1 1 240px; min-width: 0; }
+.cmp-cell canvas#screen { max-width: 100%; }
+.cmp-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+video.ref { width: 100%; max-width: 100%; background: #000; border: 1px solid var(--line); border-radius: 8px; display: block; }
 .meter { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; height: 18px; overflow: hidden; position: relative; min-width: 220px; }
 .meter > span { display: block; height: 100%; background: var(--accent); width: 0; }
 .mono { font-family: ui-monospace, monospace; }
