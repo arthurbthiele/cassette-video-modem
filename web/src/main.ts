@@ -44,6 +44,12 @@ function render() {
   (mode === "encode" ? encodeView : decodeView)();
 }
 
+// Reflect a programmatically-loaded file in the native input's label (Chromium
+// allows assigning .files via DataTransfer; harmless no-op where it doesn't).
+function setInputFile(input: HTMLInputElement, file: File): void {
+  try { const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; } catch { /* unsupported */ }
+}
+
 function loadConfigButton(s: ModemSettings, onVideo: (v: Partial<VideoConfig>) => void, after: () => void): HTMLElement {
   const input = el("input", { type: "file", accept: ".cassette,.json,application/json" }) as HTMLInputElement;
   input.style.display = "none";
@@ -118,7 +124,9 @@ function encodeView() {
     try {
       log.textContent = "Loading sample video…";
       const blob = await (await fetch(`${SAMPLE_BASE}gradient.mp4`)).blob();
-      await applyVideoFile(new File([blob], "gradient.mp4", { type: "video/mp4" }));
+      const file = new File([blob], "gradient.mp4", { type: "video/mp4" });
+      setInputFile(fileIn, file); // so the input shows "gradient.mp4", not "no file chosen"
+      await applyVideoFile(file);
       await runEncode(); // one click: load + encode + show the result
     } catch (e) { log.textContent = "Couldn't load sample: " + (e as Error).message; }
   };
@@ -350,6 +358,7 @@ function decodeView() {
       decodeProfileIdx = 1; Object.assign(s, PROFILES[1].settings); profileSel.value = "1"; // match how the sample was encoded
       sourceMode = "file"; drawSrc();
       const buf = await (await fetch(`${SAMPLE_BASE}gradient.wav`)).arrayBuffer();
+      setInputFile(fileIn, new File([buf], "gradient.wav", { type: "audio/wav" })); // show "gradient.wav" in the input
       loadWav(buf, "sample tape —");
       playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
     } catch (e) { warn.textContent = "Couldn't load sample: " + (e as Error).message; }
