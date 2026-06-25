@@ -334,6 +334,8 @@ function decodeView() {
   let playing = false;
   let lastTick = 0;
   let loadedSampleIdx: number | null = D.input?.sampleIdx ?? null;
+  let decTs = -1;          // content time (s) of the latest decoded frame; -1 = none yet
+  let refSynced = false;   // has the "Original" been started for the current play segment
 
   const playBtn = el("button", { textContent: "▶ Play" }) as HTMLButtonElement;
   const seek = el("input", { type: "range", min: "0", max: "1000", value: "0" }) as HTMLInputElement;
@@ -342,7 +344,7 @@ function decodeView() {
   const transport = el("div", { className: "row" }, [playBtn, seek, timeLabel]);
   transport.style.display = "none";
 
-  function reseek(pos: number) { buildPipeline(fileRate); playhead = pos; fed = pos; while (frameQueue.length) frameQueue.shift()!.close(); }
+  function reseek(pos: number) { buildPipeline(fileRate); playhead = pos; fed = pos; decTs = -1; refSynced = false; while (frameQueue.length) frameQueue.shift()!.close(); }
   playBtn.onclick = () => {
     if (!samples) return;
     playing = !playing;
@@ -416,22 +418,29 @@ function decodeView() {
       seek.value = String(Math.floor((playhead / samples.length) * 1000));
       timeLabel.textContent = `${(playhead / fileRate).toFixed(1)}s`;
     }
-    // Keep the "Original" paused; we slave it to the decoder's output (below) so
-    // the two panes show the same content-moment, frame-aligned. Driving it off
-    // the audio clock instead would run it ahead by the preamble + the decode
-    // pipeline latency — the source of the "decoded lags the original" offset.
-    if (refVideo.getAttribute("src") && !refVideo.paused) refVideo.pause();
     while (frameQueue.length > 1) frameQueue.shift()!.close();
     const f = frameQueue.shift();
     if (f) {
       if (canvas.width !== f.displayWidth) canvas.width = f.displayWidth;
       if (canvas.height !== f.displayHeight) canvas.height = f.displayHeight;
       ctx2d.drawImage(f, 0, 0);
-      if (refVideo.getAttribute("src") && refVideo.readyState >= 1) {
-        const t = f.timestamp / 1e6; // decoded frame's content time → seek the original to match
-        if (isFinite(t) && Math.abs(refVideo.currentTime - t) > 0.04) refVideo.currentTime = t;
-      }
+      if (isFinite(f.timestamp)) decTs = f.timestamp / 1e6; // latest decoded content time
       f.close();
+    }
+    // The "Original" stays paused through the preamble, then starts at the first
+    // real decoded frame and plays smoothly — its rate gently nudged to track the
+    // decoder, so it stays aligned over a long clip without stepping frame-by-frame.
+    if (refVideo.getAttribute("src") && refVideo.readyState >= 1) {
+      const active = sourceMode === "file" && playing;
+      if (!active) { if (!refVideo.paused) refVideo.pause(); }
+      else if (decTs >= 0) {
+        if (!refSynced) { refVideo.currentTime = decTs; refVideo.playbackRate = 1; refVideo.play().catch(() => {}); refSynced = true; }
+        else {
+          const drift = refVideo.currentTime - decTs; // + = original ahead of the decoder
+          if (Math.abs(drift) > 0.5) refVideo.currentTime = decTs; // hard catch-up after a stall/seek
+          refVideo.playbackRate = Math.max(0.5, Math.min(1.5, 1 - drift));
+        }
+      }
     }
     const active = (sourceMode === "file" && playing) || liveOn;
     meters.draw(metersCanvas, blocks > 0);
