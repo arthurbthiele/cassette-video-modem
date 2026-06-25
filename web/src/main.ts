@@ -221,26 +221,30 @@ function encodeView() {
   const result = el("div", { className: "row" });
   const audioEl = el("audio", { controls: true }) as HTMLAudioElement;
   audioEl.style.display = "none";
+  const playbackRow = el("div", { className: "row" }); // "Decode and play back" sits below the audio player
   const encodeBtn = el("button", { textContent: "ENCODE" }) as HTMLButtonElement;
 
   // (re)build the result panel from the persisted encoding
   const showResult = () => {
     result.innerHTML = "";
+    playbackRow.innerHTML = "";
     audioEl.style.display = "none";
     const enc = state.encoding;
     if (!enc) return;
     audioEl.src = enc.url; audioEl.style.display = "";
     log.textContent = enc.summary;
     result.append(
-      Object.assign(el("button", { textContent: "▶ Play it back" }), {
+      el("a", { className: "dl", href: enc.url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
+      Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(enc.modem, enc.video, "cassette.cassette") }),
+    );
+    playbackRow.append(
+      Object.assign(el("button", { textContent: "▶ Decode and play back" }), {
         onclick: () => {
           state.decode.input = { wav: enc.wav, name: "cassette.wav", referenceUrl: enc.sourceUrl, sampleIdx: null };
           state.decode.profileIdx = enc.profileIdx; state.decode.settings = { ...enc.modem }; state.decode.sourceMode = "file";
           state.tab = "decode"; decodeAutoplay = true; render();
         },
       }),
-      el("a", { className: "dl", href: enc.url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
-      Object.assign(el("button", { className: "secondary", textContent: "⬇ Save config (.cassette)" }), { onclick: () => downloadConfig(enc.modem, enc.video, "cassette.cassette") }),
     );
   };
 
@@ -290,7 +294,7 @@ function encodeView() {
     ]),
     el("div", { className: "panel" }, [el("p", { className: "muted", textContent: "Modem settings (must match the decoder — save a config to pair them)" }), panel]),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [el("label", { textContent: "Throughput" }), budget]), el("div", { className: "row" }, [meter])]),
-    el("div", { className: "panel" }, [el("div", { className: "row" }, [encodeBtn]), result, audioEl, log]),
+    el("div", { className: "panel" }, [el("div", { className: "row" }, [encodeBtn]), result, audioEl, playbackRow, log]),
   );
   updateBudget();
   showResult(); // restore the last encoding's result across renders
@@ -360,7 +364,12 @@ function decodeView() {
   const transport = el("div", { className: "row" }, [playBtn, seek, timeLabel]);
   transport.style.display = "none";
 
-  function reseek(pos: number) { buildPipeline(fileRate); playhead = pos; fed = pos; decTs = -1; refSynced = false; while (frameQueue.length) frameQueue.shift()!.close(); }
+  function reseek(pos: number) {
+    buildPipeline(fileRate); playhead = pos; fed = pos; decTs = -1; refSynced = false;
+    while (frameQueue.length) frameQueue.shift()!.close();
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height); // start fresh (not the stale last frame) on load / replay / scrub
+    if (refVideo.getAttribute("src") && refVideo.duration && samples) refVideo.currentTime = Math.max(0, Math.min(refVideo.duration, (pos / samples.length) * refVideo.duration));
+  }
   playBtn.onclick = () => {
     if (!samples) return;
     playing = !playing;
