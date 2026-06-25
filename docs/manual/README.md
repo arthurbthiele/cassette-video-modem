@@ -5,6 +5,10 @@ A walkthrough of the web app's two flows, with screenshots captured from the
 below is a real run, not a mockup — this is the app doing exactly what the captions
 say. Use Chrome or Edge (the app uses WebCodecs).
 
+**Just want to see it work?** The decode tab has a **▶ Try a sample tape** button — it
+loads a bundled, pre-encoded clip and plays it immediately, no files needed. The encode
+tab has a **Try a sample** button that loads a sample video ready to encode.
+
 The loop is symmetric: **Encode** turns a video file into a WAV of modem audio you
 can record to tape; **Decode** takes that audio back (from a file or live line-in)
 and plays the video as it decodes. The one rule that matters: **the decoder's modem

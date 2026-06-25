@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 cassette-venv/
 *.cassette
+
+# bundled demo assets shipped with the web app (exceptions to the rules above)
+!web/public/samples/*.wav
+!web/public/samples/*.cassette

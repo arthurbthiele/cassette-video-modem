@@ -25,6 +25,7 @@ const CODECS: Record<string, string> = {
   "H.264": "avc1.42001E",
 };
 const app = document.getElementById("app")!;
+const SAMPLE_BASE = `${import.meta.env.BASE_URL}samples/`; // bundled demo assets
 let mode: "encode" | "decode" = "encode";
 
 function render() {
@@ -94,9 +95,8 @@ function encodeView() {
   heightInput.oninput = () => { video.height = parseFloat(heightInput.value) || 0; updateBudget(); };
 
   const fileIn = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
-  fileIn.onchange = () => {
-    videoFile = fileIn.files?.[0] ?? null;
-    if (!videoFile) return;
+  const applyVideoFile = (f: File) => {
+    videoFile = f;
     const probe = document.createElement("video");
     probe.preload = "metadata";
     probe.onloadedmetadata = () => {
@@ -108,7 +108,17 @@ function encodeView() {
       }
       URL.revokeObjectURL(probe.src);
     };
-    probe.src = URL.createObjectURL(videoFile);
+    probe.src = URL.createObjectURL(f);
+  };
+  fileIn.onchange = () => { const f = fileIn.files?.[0]; if (f) applyVideoFile(f); };
+  const sampleVideoBtn = el("button", { className: "secondary", textContent: "Try a sample" }) as HTMLButtonElement;
+  sampleVideoBtn.onclick = async () => {
+    try {
+      log.textContent = "Loading sample video…";
+      const blob = await (await fetch(`${SAMPLE_BASE}gradient.mp4`)).blob();
+      applyVideoFile(new File([blob], "gradient.mp4", { type: "video/mp4" }));
+      log.textContent = "Sample loaded — press ENCODE.";
+    } catch (e) { log.textContent = "Couldn't load sample: " + (e as Error).message; }
   };
   const codecSel = el("select") as HTMLSelectElement;
   for (const label of Object.keys(CODECS)) codecSel.append(el("option", { value: label, textContent: label, selected: video.codec === CODECS[label] }));
@@ -159,7 +169,7 @@ function encodeView() {
       el("p", { className: "muted", textContent: profile.description }),
     ]),
     el("div", { className: "panel" }, [
-      el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn]),
+      el("div", { className: "row" }, [el("label", { textContent: "Video file" }), fileIn, sampleVideoBtn]),
       el("div", { className: "row" }, [el("label", { textContent: "Codec" }), codecSel]),
       num("Width", video.width, (v) => (video.width = v), 16),
       el("div", { className: "row" }, [el("label", { textContent: "Height (auto from source)" }), heightInput]),
@@ -241,16 +251,15 @@ function decodeView() {
   seek.oninput = () => { if (samples) reseek(Math.floor((parseInt(seek.value) / 1000) * samples.length)); };
 
   const fileIn = el("input", { type: "file", accept: "audio/wav,.wav" }) as HTMLInputElement;
-  fileIn.onchange = async () => {
-    const f = fileIn.files?.[0];
-    if (!f) return;
+  const loadWav = (buf: ArrayBuffer, label: string) => {
     warn.textContent = "";
-    const dec = decodeWav(await f.arrayBuffer());
+    const dec = decodeWav(buf);
     samples = dec.samples; fileRate = dec.sampleRate;
     reseek(0); playing = false; playBtn.textContent = "▶ Play";
     transport.style.display = "";
-    stats.textContent = `loaded ${(samples.length / fileRate).toFixed(1)}s — press play (or scrub to start anywhere)`;
+    stats.textContent = `${label} ${(samples.length / fileRate).toFixed(1)}s — press play (or scrub to start anywhere)`;
   };
+  fileIn.onchange = async () => { const f = fileIn.files?.[0]; if (f) loadWav(await f.arrayBuffer(), "loaded"); };
 
   // ── LIVE: realtime capture ──
   let liveCap: Capture | null = null;
@@ -331,6 +340,18 @@ function decodeView() {
   profileSel.onchange = () => { decodeProfileIdx = parseInt(profileSel.value); Object.assign(s, PROFILES[decodeProfileIdx].settings); if (samples) reseek(0); render(); };
   const reapply = () => { if (samples) reseek(Math.floor(playhead)); };
 
+  const sampleTapeBtn = el("button", { className: "secondary", textContent: "▶ Try a sample tape" }) as HTMLButtonElement;
+  sampleTapeBtn.onclick = async () => {
+    try {
+      stats.textContent = "Loading sample tape…";
+      decodeProfileIdx = 1; Object.assign(s, PROFILES[1].settings); profileSel.value = "1"; // match how the sample was encoded
+      sourceMode = "file"; drawSrc();
+      const buf = await (await fetch(`${SAMPLE_BASE}gradient.wav`)).arrayBuffer();
+      loadWav(buf, "sample tape —");
+      playing = true; playBtn.textContent = "❚❚ Pause"; lastTick = performance.now(); // auto-play the demo
+    } catch (e) { warn.textContent = "Couldn't load sample: " + (e as Error).message; }
+  };
+
   const popBtn = el("button", { className: "secondary", textContent: "⧉ Pop out" });
   popBtn.onclick = async () => {
     const dpip = (window as any).documentPictureInPicture;
@@ -346,6 +367,7 @@ function decodeView() {
     el("div", { className: "panel" }, [
       el("div", { className: "row" }, [el("label", { textContent: "Profile" }), profileSel, loadConfigButton(s, () => {}, () => render())]),
       srcRow,
+      el("div", { className: "row" }, [sampleTapeBtn, el("span", { className: "muted", textContent: "one-click demo — loads a bundled tape and plays it" })]),
       transport,
       liveRow,
       el("p", { className: "muted", textContent: "Pick the profile (or Load the encoder's .cassette config), choose the WAV, press play — it decodes in real time; scrub to start anywhere. Changing settings re-syncs." }),
