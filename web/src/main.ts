@@ -416,18 +416,23 @@ function decodeView() {
       seek.value = String(Math.floor((playhead / samples.length) * 1000));
       timeLabel.textContent = `${(playhead / fileRate).toFixed(1)}s`;
     }
-    // mirror the transport onto the "Original" reference video (play/pause/seek)
-    if (refVideo.getAttribute("src")) {
-      if (sourceMode === "file" && playing) { if (refVideo.paused) refVideo.play().catch(() => {}); }
-      else if (!refVideo.paused) refVideo.pause();
-      if (samples && refVideo.duration) {
-        const targ = (playhead / samples.length) * refVideo.duration;
-        if (Math.abs(refVideo.currentTime - targ) > 0.35) refVideo.currentTime = targ;
-      }
-    }
+    // Keep the "Original" paused; we slave it to the decoder's output (below) so
+    // the two panes show the same content-moment, frame-aligned. Driving it off
+    // the audio clock instead would run it ahead by the preamble + the decode
+    // pipeline latency — the source of the "decoded lags the original" offset.
+    if (refVideo.getAttribute("src") && !refVideo.paused) refVideo.pause();
     while (frameQueue.length > 1) frameQueue.shift()!.close();
     const f = frameQueue.shift();
-    if (f) { if (canvas.width !== f.displayWidth) canvas.width = f.displayWidth; if (canvas.height !== f.displayHeight) canvas.height = f.displayHeight; ctx2d.drawImage(f, 0, 0); f.close(); }
+    if (f) {
+      if (canvas.width !== f.displayWidth) canvas.width = f.displayWidth;
+      if (canvas.height !== f.displayHeight) canvas.height = f.displayHeight;
+      ctx2d.drawImage(f, 0, 0);
+      if (refVideo.getAttribute("src") && refVideo.readyState >= 1) {
+        const t = f.timestamp / 1e6; // decoded frame's content time → seek the original to match
+        if (isFinite(t) && Math.abs(refVideo.currentTime - t) > 0.04) refVideo.currentTime = t;
+      }
+      f.close();
+    }
     const active = (sourceMode === "file" && playing) || liveOn;
     meters.draw(metersCanvas, blocks > 0);
     stats.textContent = `blocks: ${blocks}` + (active && blocks === 0 && fed > fileRate ? "  ·  no data — check the profile/settings match the encoder" : "");
