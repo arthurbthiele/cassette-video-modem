@@ -37,6 +37,7 @@ const SAMPLES = [
   { file: "plasma.mp4", label: "Plasma — longer (~16s)", note: "A calmer, longer clip; still fits with room to spare." },
   { file: "detail.mp4", label: "Test chart — detail limit", note: "Fine lines & gratings blur away at 128×96 grayscale." },
   { file: "motion.mp4", label: "Busy motion — bitrate limit", note: "Too busy for the channel — encodes slower than real time and breaks up. Good for seeing the limit." },
+  { file: "aerial.mp4", label: "Aerial — real footage (~25s)", note: "Real in-flight footage (CC0 public domain). A longer, natural clip — encoding and decoding take a while." },
 ];
 
 const AV1 = CODECS["AV1 (best compression)"];

@@ -1,0 +1,11 @@
+Sample clips
+============
+gradient.mp4, plasma.mp4, detail.mp4, motion.mp4
+  Generated with ffmpeg (synthetic test patterns) — public domain.
+
+aerial.mp4
+  A 25s excerpt of "Flight between Charleston and Miami, Summer 2013" from
+  "Public Domain CC0 Air Travel Stock Video Footage" by Iwan 'qubodup' Gabovitch.
+  Source: https://archive.org/details/PublicDomainCc0AirTravelStockVideoFootage
+  Licence: CC0 1.0 Universal (public domain dedication) — no attribution required;
+  credited here as a courtesy.
