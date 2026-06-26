@@ -36,7 +36,7 @@ const SAMPLES = [
   { file: "gradient.mp4", label: "Gradient — clean demo", note: "Smooth and low-motion — fits the channel easily." },
   { file: "plasma.mp4", label: "Plasma — longer (~16s)", note: "A calmer, longer clip; still fits with room to spare." },
   { file: "detail.mp4", label: "Test chart — detail limit", note: "Fine lines & gratings blur away at 128×96 grayscale." },
-  { file: "motion.mp4", label: "Busy motion — bitrate limit", note: "Too busy for the channel: encodes slower than real-time (⚠) and blocks up." },
+  { file: "motion.mp4", label: "Busy motion — bitrate limit", note: "Too busy for the channel — encodes slower than real time and breaks up. Good for seeing the limit." },
 ];
 
 const AV1 = CODECS["AV1 (best compression)"];
@@ -155,7 +155,7 @@ function encodeView() {
   const meter = el("div", { className: "meter" }, [el("span")]);
   const updateBudget = () => {
     const netKBs = netKBytesPerSec(s);
-    budget.textContent = `Channel: ${netKBs.toFixed(3)} KB/s net  ·  video budget: ${(videoBitrateBudget(s, { fillFactor: 0.9 }) / 1000).toFixed(2)} kbps  ·  ${video.width}×${video.height} @ ${video.fps}fps`;
+    budget.textContent = `Tape capacity: ${netKBs.toFixed(2)} KB/s  ·  usable for video: ${(videoBitrateBudget(s, { fillFactor: 0.9 }) / 1000).toFixed(1)} kbps  ·  picture ${video.width}×${video.height} at ${video.fps} fps`;
     (meter.firstChild as HTMLElement).style.width = `${Math.min(100, (netKBs / 1.2) * 100)}%`;
   };
 
@@ -169,14 +169,14 @@ function encodeView() {
     render();
   };
 
-  const num = (label: string, val: number, on: (v: number) => void, step = 1, tip = "") => {
-    const i = el("input", { type: "number", value: String(val), step: String(step) }) as HTMLInputElement;
+  const num = (label: string, val: number, on: (v: number) => void, _step = 1, tip = "") => {
+    const i = el("input", { type: "number", value: String(val), step: "any" }) as HTMLInputElement; // step="any" → no off-grid "invalid" bubble
     i.style.width = "90px";
     i.oninput = () => { on(parseFloat(i.value) || 0); updateBudget(); };
     return el("div", { className: "row" }, [el("label", { textContent: label, title: tip }), i]);
   };
 
-  const heightInput = el("input", { type: "number", value: String(video.height), step: "8" }) as HTMLInputElement;
+  const heightInput = el("input", { type: "number", value: String(video.height), step: "any" }) as HTMLInputElement;
   heightInput.style.width = "90px";
   heightInput.oninput = () => { video.height = parseFloat(heightInput.value) || 0; updateBudget(); };
 
@@ -257,6 +257,9 @@ function encodeView() {
 
   const runEncode = async () => {
     if (!E.sourceFile) { log.textContent = "Choose a video file first (or try a sample)."; log.className = "log notice"; return; }
+    video.width = Math.max(2, Math.round(video.width / 2) * 2); // codecs need even, integer dimensions
+    video.height = Math.max(2, Math.round(video.height / 2) * 2);
+    video.fps = Math.max(1, Math.round(video.fps)); // fps 0 would make the budget math blow up
     if (video.width < 96 || video.height < 64) { log.textContent = "Picture too small — the video codec needs at least 96×64 pixels. Pick a roomier profile, or a less extreme crop."; log.className = "log notice"; return; }
     encodeBtn.disabled = true;
     result.innerHTML = "";
@@ -267,9 +270,9 @@ function encodeView() {
       const { wav, fit, audioSecs, videoSecs } = await encodeFileToWav(E.sourceFile, s, video, !E.colour, (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`));
       const ratio = (audioSecs / videoSecs).toFixed(2);
       const rt = fit.fits
-        ? `▶ fits the channel — plays back in real time (audio ${ratio}× the video).`
-        : `⚠ too detailed to play from tape in real time (audio ${ratio}× the video). Use a smaller picture / lower frame rate, or a calmer clip — it still decodes correctly when you scrub.`;
-      const summary = `Done. ${fit.container.length} B → ${audioSecs.toFixed(1)}s audio · ${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps · ${rt}`;
+        ? `▶ Fits the channel — plays back from tape in real time.`
+        : `⚠ Too busy to play back from tape at normal speed (the audio runs ${ratio}× longer than the video). It still decodes correctly when you scrub; for real-time playback try a smaller picture, lower frame rate, or a calmer clip.`;
+      const summary = `Encoded ${fit.container.length} bytes into ${audioSecs.toFixed(1)}s of audio (${(fit.containerBitsPerSec / 1000).toFixed(1)} kbps). ${rt}`;
       // record the encoding and point the Decode tab at it (encode output = decode input)
       setEncoding({ wav, url: URL.createObjectURL(wav), sourceUrl: URL.createObjectURL(E.sourceFile), modem: { ...s }, video: { ...video }, profileIdx: E.profileIdx, summary });
       state.decode.input = { wav, name: "cassette.wav", referenceUrl: state.encoding!.sourceUrl, sampleIdx: null };
@@ -298,12 +301,12 @@ function encodeView() {
       el("div", { className: "row" }, [el("label", { textContent: "Codec", title: "Video codec. AV1 compresses best (recommended for the tiny channel); H.264 is the most broadly supported." }), codecSel]),
       el("div", { className: "row" }, [el("label", { textContent: "Colour", title: "Encode in colour instead of grayscale. Same bitrate, so colour steals detail from the picture — best on roomy profiles (Clean line / CD)." }), colourCheck]),
       num("Width", video.width, (v) => (video.width = v), 16, "Picture width in pixels. Smaller = fewer bits, fits more easily."),
-      el("div", { className: "row" }, [el("label", { textContent: "Height (auto from source)", title: "Picture height — auto-set from your video's aspect ratio (a multiple of 8). Smaller = fewer bits." }), heightInput]),
+      el("div", { className: "row" }, [el("label", { textContent: "Height (auto)", title: "Picture height — auto-set from your video's aspect ratio. Smaller = fewer bits." }), heightInput]),
       num("Frame rate", video.fps, (v) => (video.fps = v), 1, "Frames per second. Lower = fewer bits and an easier fit."),
-      num("Keyframe interval (s)", video.gopSeconds, (v) => (video.gopSeconds = v), 1, "Seconds between full keyframes. Longer compresses better, but a dropout costs more until the next keyframe."),
+      num("Keyframe interval (seconds)", video.gopSeconds, (v) => (video.gopSeconds = v), 1, "Seconds between full keyframes. Longer compresses better, but a dropout costs more until the next keyframe."),
     ]),
     el("div", { className: "panel" }, [el("p", { className: "muted", textContent: "Modem settings (must match the decoder — save a config to pair them)" }), panel]),
-    el("div", { className: "panel" }, [el("div", { className: "row" }, [el("label", { textContent: "Throughput" }), budget]), el("div", { className: "row" }, [meter])]),
+    el("div", { className: "panel" }, [el("div", { className: "row" }, [el("label", { textContent: "Capacity" }), budget]), el("div", { className: "row" }, [meter])]),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [encodeBtn]), result, audioEl, playbackRow, log]),
   );
   updateBudget();
@@ -416,7 +419,7 @@ function decodeView() {
       const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
       tmp.getTracks().forEach((t) => t.stop());
       for (const d of await listInputDevices()) deviceSel.append(el("option", { value: d.deviceId, textContent: d.label }));
-    } catch { deviceSel.append(el("option", { value: "", textContent: "(grant mic access to list devices)" })); }
+    } catch { deviceSel.append(el("option", { value: "", textContent: "(allow microphone access to list devices)" })); }
   };
   deviceSel.onchange = () => (deviceId = deviceSel.value || undefined);
   const liveStart = el("button", { textContent: "▶ Start" }) as HTMLButtonElement;
@@ -425,9 +428,9 @@ function decodeView() {
     stopAll();
     const cap = new Capture(); liveCap = cap; liveOn = true;
     try {
-      await cap.start(deviceId, s.sampleRate, (smp: Float32Array) => { if (!ds) return; meters.push(smp); for (const b of ds.feedAudio(smp)) handle(b.seq, b.payload); });
+      await cap.start(deviceId, s.sampleRate, (smp: Float32Array) => { if (!ds) return; meters.push(smp); try { for (const b of ds.feedAudio(smp)) handle(b.seq, b.payload); } catch (err) { warn.textContent = "Decode error: " + (err as Error).message; stopAll(); } });
       buildPipeline(cap.sampleRate); // build at the rate actually achieved
-    } catch (e) { liveCap = null; liveOn = false; warn.textContent = "Microphone/line-in error: " + (e as Error).message; }
+    } catch (e) { liveCap = null; liveOn = false; warn.textContent = "Couldn't start the audio input: " + (e as Error).message; }
   };
   liveStop.onclick = () => { liveCap?.stop(); liveCap = null; liveOn = false; };
   function stopAll() { liveCap?.stop(); liveCap = null; liveOn = false; playing = false; }
@@ -441,14 +444,18 @@ function decodeView() {
         lastTick = now;
         if (playhead >= samples.length) { playing = false; playBtn.textContent = "▶ Play"; }
       }
-      let budget = Math.floor(fileRate * 0.5);
+      // Time-box the synchronous decode per frame (not a fixed sample budget):
+      // low-data-rate profiles pack many FFTs per audio-second, which would block
+      // the frame and freeze the page. Capping by wall-clock degrades to
+      // slower-than-real-time playback instead of locking up.
+      const deadline = performance.now() + 8;
       const target = Math.floor(playhead);
-      while (fed < target && budget > 0) {
+      while (fed < target && performance.now() < deadline) {
         const end = Math.min(fed + 4096, target);
         const chunk = samples.subarray(fed, end);
         meters.push(chunk);
-        for (const b of ds.feedAudio(chunk)) handle(b.seq, b.payload);
-        budget -= end - fed;
+        try { for (const b of ds.feedAudio(chunk)) handle(b.seq, b.payload); }
+        catch (err) { warn.textContent = "Decode error: " + (err as Error).message + " — check the modem settings."; playing = false; break; }
         fed = end;
       }
       seek.value = String(Math.floor((playhead / samples.length) * 1000));
@@ -576,7 +583,7 @@ function decodeView() {
       el("p", { className: "muted", textContent: "Decode a tape back to video. The Profile must match the one it was encoded with (or Load its .cassette config); then choose the WAV and press Play — it decodes in real time, and you can scrub to start anywhere." }),
       panel,
     ]),
-    el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn, refBtn, refIn]), stats, warn, el("p", { className: "muted", textContent: "Signal (green = locked/decoding, amber = signal but no lock, grey = silent):" }), metersCanvas]),
+    el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn, refBtn, refIn]), stats, warn, el("p", { className: "muted", textContent: "Signal: green = locked on and decoding · amber = hearing something but not locked on · grey = silence" }), metersCanvas]),
     canvasHolder,
   );
   canvasHolder.append(transport); // play bar sits below the two videos

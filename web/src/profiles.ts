@@ -18,31 +18,31 @@ export interface DeviceProfile {
 export const PROFILES: DeviceProfile[] = [
   {
     name: "Clean line / CD / PC audio",
-    description: "A clean digital channel (line-in/out, CD, soundcard). Highest-bitrate OFDM (8-phase), the biggest picture.",
+    description: "A clean digital connection (line-in/out, CD, sound card). The fastest setting — the biggest, sharpest picture.",
     settings: { method: "ofdm", ofdmFMin: 300, ofdmFMax: 6000, ofdmPhases: 8, reedSolomon: true, rsNsym: 8, constantPower: false },
     video: { width: 160, height: 120, fps: 12 },
   },
   {
     name: "Good cassette / tape deck",
-    description: "A decent deck and tape with light wow/flutter. OFDM in the usable band, moderate error correction.",
+    description: "A decent cassette deck and tape with light wow/flutter. A solid all-round default.",
     settings: { method: "ofdm", ofdmFMin: 500, ofdmFMax: 6000, ofdmPhases: 4, reedSolomon: true, rsNsym: 16, constantPower: false },
     video: { width: 128, height: 96, fps: 8 },
   },
   {
     name: "Telephone line (narrow)",
-    description: "A narrow ~500–3400 Hz voice channel. OFDM squeezed into the band.",
+    description: "A narrow, phone-quality voice channel (~500–3400 Hz). Smaller picture.",
     settings: { method: "ofdm", ofdmFMin: 500, ofdmFMax: 3400, ofdmPhases: 4, reedSolomon: true, rsNsym: 16, constantPower: false },
     video: { width: 96, height: 72, fps: 6 },
   },
   {
     name: "Cheap cassette deck (AGC)",
-    description: "A cheap deck with automatic gain control. 8-phase DPSK + a constant-power carrier so the AGC stops hunting.",
+    description: "A cheap cassette deck whose automatic volume keeps adjusting — uses a steady tone to stop it hunting. Smaller picture.",
     settings: { method: "dpsk", dpskBaud: 1800, dpskCarrier: 2600, dpskPhases: 8, constantPower: true, reedSolomon: true, rsNsym: 16 },
     video: { width: 96, height: 72, fps: 6 },
   },
   {
     name: "Robust (noisy / AGC)",
-    description: "Worst usable case: noisy, AGC. 4-phase DPSK + constant-power carrier + heavy error correction. Tiny picture, most reliable.",
+    description: "For the worst conditions: noisy, with automatic volume control. Heavy error correction. Tiny picture, most reliable.",
     settings: { method: "dpsk", dpskBaud: 2400, dpskCarrier: 2400, dpskPhases: 4, constantPower: true, reedSolomon: true, rsNsym: 24 },
     video: { width: 96, height: 64, fps: 5 },
   },

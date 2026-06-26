@@ -28,6 +28,8 @@ export async function framesFromFile(file: File, opts: FrameSourceOptions): Prom
 
     const dur = video.duration;
     if (!isFinite(dur) || dur <= 0) throw new Error("Couldn't read this video's length — the file may be in a format the browser can't fully decode. Try re-saving it as MP4 (H.264) or WebM.");
+    const wanted = Math.ceil(dur / (1 / opts.fps));
+    if (wanted > 1500) throw new Error(`This clip is too long to encode in the browser (${wanted} frames at ${opts.fps} fps). Trim it shorter or lower the frame rate.`);
 
     const canvas = new OffscreenCanvas(opts.width, opts.height);
     const ctx = canvas.getContext("2d")!;

@@ -15,17 +15,17 @@ export function settingsPanel(s: ModemSettings, onChange: () => void, opts: { hi
 
   const rebuild = () => {
     root.innerHTML = "";
-    root.append(el("p", { className: "muted", style: "margin:0 0 8px", textContent: "Your profile already sets these. Change them only to experiment — the encoder and decoder must use identical values (hover each label for what it does)." }));
+    root.append(el("p", { className: "muted", style: "margin:0 0 8px", textContent: "Your profile already sets these — change them only to experiment. The encoder and decoder must use the same values, so save a .cassette to keep them matched. (Hover a label for what it does.)" }));
 
-    const methodRow = el("div", { className: "row" }, [el("label", { textContent: "Modulation", title: "How the data rides in the audio. OFDM = fastest / biggest picture; DPSK = robust on AGC decks; FSK / 4-FSK = slowest but most robust (too slow to carry video at these rates)." })]);
+    const methodRow = el("div", { className: "row" }, [el("label", { textContent: "Modulation", title: "How the data rides in the audio. OFDM = fastest / biggest picture; DPSK = robust on cheap AGC decks; FSK / 4-FSK = most robust, but too slow to carry video (kept for data/experiments)." })]);
     const methodSel = el("select") as HTMLSelectElement;
     for (const m of ["ofdm", "dpsk", "fsk4", "fsk"]) methodSel.append(el("option", { value: m, textContent: m.toUpperCase(), selected: s.method === m }));
     methodSel.onchange = () => { s.method = methodSel.value as Method; onChange(); rebuild(); };
     methodRow.append(methodSel);
     root.append(methodRow);
 
-    const num = (label: string, key: Num, step = 1, tip = "") => {
-      const i = el("input", { type: "number", value: String(s[key]), step: String(step) }) as HTMLInputElement;
+    const num = (label: string, key: Num, _step = 1, tip = "") => {
+      const i = el("input", { type: "number", value: String(s[key]), step: "any" }) as HTMLInputElement; // step="any" → no off-grid "invalid" bubble (e.g. DPSK baud/carrier)
       i.style.width = "90px";
       i.oninput = () => { (s[key] as number) = parseFloat(i.value) || 0; onChange(); };
       return el("div", { className: "row" }, [el("label", { textContent: label, title: tip }), i]);
@@ -45,8 +45,8 @@ export function settingsPanel(s: ModemSettings, onChange: () => void, opts: { hi
     if (s.method === "fsk") root.append(num("FSK baud", "fskBaud", 100), num("FSK freq 0 (Hz)", "fskF0", 100), num("FSK freq 1 (Hz)", "fskF1", 100));
     if (s.method === "fsk4") root.append(num("4-FSK baud", "fsk4Baud", 100), num("Freq 0", "fsk4F0", 100), num("Freq 1", "fsk4F1", 100), num("Freq 2", "fsk4F2", 100), num("Freq 3", "fsk4F3", 100));
     if (s.method === "dpsk") {
-      root.append(num("DPSK baud", "dpskBaud", 100, "Symbols per second."), num("Carrier (Hz)", "dpskCarrier", 100, "Centre frequency of the DPSK carrier."));
-      root.append(phasesRow("DPSK phases", s, "dpskPhases", onChange));
+      root.append(num("Speed (baud)", "dpskBaud", 100, "Symbols per second — the raw signalling rate."), num("Carrier (Hz)", "dpskCarrier", 100, "Centre frequency of the DPSK carrier."));
+      root.append(phasesRow("Phases per carrier", s, "dpskPhases", onChange));
     }
     if (s.method === "ofdm") {
       root.append(
@@ -56,7 +56,7 @@ export function settingsPanel(s: ModemSettings, onChange: () => void, opts: { hi
         num("Max freq (Hz)", "ofdmFMax", 100, "Top of the audio band used. Cheap tape rolls off around 6 kHz."),
         num("Pilot interval", "ofdmPilotInterval", 1, "Every Nth subcarrier is a known pilot, used to track phase and timing."),
       );
-      root.append(phasesRow("OFDM phases/carrier", s, "ofdmPhases", onChange));
+      root.append(phasesRow("Phases per carrier", s, "ofdmPhases", onChange));
     }
 
     root.append(el("hr", { style: "border-color:#2c3038" }));

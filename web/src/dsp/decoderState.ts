@@ -129,6 +129,7 @@ export class DecoderState {
       const blockBytes = bitsToBytes(this.bits.slice(idx, idx + neededBits));
       const r = deframeBlock(blockBytes, this.s.reedSolomon, this.s.rsNsym);
       if (r) {
+        if (this.seen.size > 8192) this.seen.clear(); // bound for long live sessions (dedup only needs recent seqs)
         if (!this.seen.has(r.seq)) { this.seen.add(r.seq); found.push({ seq: r.seq, payload: r.payload }); }
         consumed = idx + neededBits;
         pos = consumed;
