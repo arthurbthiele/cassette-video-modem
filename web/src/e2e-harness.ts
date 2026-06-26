@@ -135,8 +135,37 @@ function ofdmWowSweep(depths: number[]) {
   return res;
 }
 
+// Does DPSK need the constant-power carrier on an AGC channel? DPSK is
+// constant-envelope, so the hypothesis is it survives AGC without the tone.
+function agcCarrierTest() {
+  const base = { ...DEFAULT_SETTINGS, method: "dpsk" as const, dpskBaud: 1800, dpskCarrier: 2600, dpskPhases: 8, reedSolomon: true, rsNsym: 16 };
+  const data = new Uint8Array(2000);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 37) % 256;
+  const expected = Math.ceil(data.length / base.blockDataSize);
+  const blocksOf = (s: typeof base, ch: ChannelOptions | null) => {
+    const audio = Float32Array.from(encodeStream(data, s));
+    const smp = ch ? simulateChannel(audio, ch) : audio;
+    const ds = new DecoderState(s);
+    let bl = 0;
+    for (let i = 0; i < smp.length; i += 4096) for (const b of ds.feedAudio(smp.subarray(i, i + 4096))) if (b.seq !== METADATA_SEQ) bl++;
+    return bl;
+  };
+  const sr = base.sampleRate;
+  const agc: ChannelOptions = { sampleRate: sr, bandLowHz: 300, bandHighHz: 6500, snrDb: 26, dropoutPerSec: 0.3, agc: true };
+  // 2×2: phases {4,8} × carrier {on,off}, all through the full cheap-AGC channel
+  const cell = (phases: number, cp: boolean) => `${blocksOf({ ...base, dpskPhases: phases, constantPower: cp }, agc)}/${expected}`;
+  return {
+    expected,
+    "8phase_carrierON": cell(8, true),
+    "8phase_carrierOFF": cell(8, false),
+    "4phase_carrierON": cell(4, true),
+    "4phase_carrierOFF": cell(4, false),
+  };
+}
+
 (async () => {
   const results: Record<string, any> = {};
+  try { results["_agc carrier (dpsk)"] = agcCarrierTest(); } catch (e) { results["_agc carrier (dpsk)"] = { error: String(e) }; }
   try { results["_ofdm tracker unit"] = ofdmTrackerUnitTest(); } catch (e) { results["_ofdm tracker unit"] = { error: String(e) }; }
   try { results["_ofdm wow sweep"] = ofdmWowSweep([0.0005, 0.001, 0.002, 0.003, 0.005]); } catch (e) { results["_ofdm wow sweep"] = { error: String(e) }; }
   for (const p of PROFILES) {

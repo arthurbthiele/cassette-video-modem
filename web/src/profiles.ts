@@ -37,14 +37,14 @@ export const PROFILES: DeviceProfile[] = [
   {
     name: "Cheap cassette deck (AGC)",
     description: "A cheap cassette deck whose automatic volume keeps adjusting — uses a steady tone to stop it hunting. Smaller picture.",
-    settings: { method: "dpsk", dpskBaud: 1800, dpskCarrier: 2600, dpskPhases: 8, constantPower: true, reedSolomon: true, rsNsym: 16 },
-    video: { width: 96, height: 72, fps: 6 },
+    settings: { method: "dpsk", dpskBaud: 1800, dpskCarrier: 2600, dpskPhases: 4, constantPower: false, reedSolomon: true, rsNsym: 16 },
+    video: { width: 96, height: 72, fps: 4 },
   },
   {
     name: "Robust (noisy / AGC)",
     description: "For the worst conditions: noisy, with automatic volume control. Heavy error correction. Tiny picture, most reliable.",
-    settings: { method: "dpsk", dpskBaud: 2400, dpskCarrier: 2400, dpskPhases: 4, constantPower: true, reedSolomon: true, rsNsym: 24 },
-    video: { width: 96, height: 64, fps: 5 },
+    settings: { method: "dpsk", dpskBaud: 1800, dpskCarrier: 2600, dpskPhases: 4, constantPower: false, reedSolomon: true, rsNsym: 24 },
+    video: { width: 96, height: 64, fps: 4 },
   },
 ];
 
