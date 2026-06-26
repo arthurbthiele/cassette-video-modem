@@ -23,7 +23,7 @@ export class Capture {
 
   sampleRate = 0;
 
-  async start(deviceId: string | undefined, onChunk: (samples: Float32Array) => void): Promise<void> {
+  async start(deviceId: string | undefined, sampleRate: number, onChunk: (samples: Float32Array) => void): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         deviceId: deviceId ? { exact: deviceId } : undefined,
@@ -32,7 +32,11 @@ export class Capture {
         noiseSuppression: false,
       },
     });
-    this.ctx = new AudioContext();
+    // Pin the context to the modem's rate so the browser resamples the device
+    // for us — a 192 kHz line-in otherwise won't match the decoder's fixed
+    // symbol length and never locks (and used to crash the tab).
+    try { this.ctx = new AudioContext(sampleRate ? { sampleRate } : {}); }
+    catch { this.ctx = new AudioContext(); }
     this.sampleRate = this.ctx.sampleRate;
     await addCaptureWorklet(this.ctx);
     const source = this.ctx.createMediaStreamSource(this.stream);

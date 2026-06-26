@@ -424,8 +424,10 @@ function decodeView() {
   liveStart.onclick = async () => {
     stopAll();
     const cap = new Capture(); liveCap = cap; liveOn = true;
-    try { await cap.start(deviceId, (() => { buildPipeline(cap.sampleRate); return (smp: Float32Array) => { meters.push(smp); for (const b of ds!.feedAudio(smp)) handle(b.seq, b.payload); }; })()); }
-    catch (e) { liveCap = null; liveOn = false; warn.textContent = "Input error: " + (e as Error).message; }
+    try {
+      await cap.start(deviceId, s.sampleRate, (smp: Float32Array) => { if (!ds) return; meters.push(smp); for (const b of ds.feedAudio(smp)) handle(b.seq, b.payload); });
+      buildPipeline(cap.sampleRate); // build at the rate actually achieved
+    } catch (e) { liveCap = null; liveOn = false; warn.textContent = "Microphone/line-in error: " + (e as Error).message; }
   };
   liveStop.onclick = () => { liveCap?.stop(); liveCap = null; liveOn = false; };
   function stopAll() { liveCap?.stop(); liveCap = null; liveOn = false; playing = false; }

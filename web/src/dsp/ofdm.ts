@@ -169,6 +169,10 @@ export class OfdmStreamDemod {
     if (this.buf.length === 0) this.buf = audio.slice();
     else { const n = new Float64Array(this.buf.length + audio.length); n.set(this.buf); n.set(audio, this.buf.length); this.buf = n; }
     const out: number[] = [];
+    // While unlocked, keep only a recent window. Otherwise a signal that never
+    // locks (wrong sample rate, silence, noise) grows buf without bound and
+    // tryLock rescans all of it every push → O(n²) → the page freezes/crashes.
+    if (!this.locked && this.buf.length > 120 * this.SL) this.buf = this.buf.slice(this.buf.length - 80 * this.SL);
     if (!this.locked && !this.tryLock()) return out;
     const SL = this.SL;
     while (this.pos + SL + 1 <= this.buf.length && this.pos >= 0) {
