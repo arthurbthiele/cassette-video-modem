@@ -17,7 +17,7 @@ export function settingsPanel(s: ModemSettings, onChange: () => void, opts: { hi
     root.innerHTML = "";
     root.append(el("p", { className: "muted", style: "margin:0 0 8px", textContent: "Your profile already sets these. Change them only to experiment — the encoder and decoder must use identical values (hover each label for what it does)." }));
 
-    const methodRow = el("div", { className: "row" }, [el("label", { textContent: "Modulation", title: "How data rides in the audio. OFDM = fastest / biggest picture; DPSK = robust on AGC decks; FSK / 4-FSK = slowest but toughest (data only — too slow for video)." })]);
+    const methodRow = el("div", { className: "row" }, [el("label", { textContent: "Modulation", title: "How the data rides in the audio. OFDM = fastest / biggest picture; DPSK = robust on AGC decks; FSK / 4-FSK = slowest but most robust (too slow to carry video at these rates)." })]);
     const methodSel = el("select") as HTMLSelectElement;
     for (const m of ["ofdm", "dpsk", "fsk4", "fsk"]) methodSel.append(el("option", { value: m, textContent: m.toUpperCase(), selected: s.method === m }));
     methodSel.onchange = () => { s.method = methodSel.value as Method; onChange(); rebuild(); };

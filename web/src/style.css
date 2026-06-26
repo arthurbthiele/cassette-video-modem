@@ -31,5 +31,8 @@ video.ref { width: 100%; max-width: 100%; background: #000; border: 1px solid va
 .meter > span { display: block; height: 100%; background: var(--accent); width: 0; }
 .mono { font-family: ui-monospace, monospace; }
 .muted { color: var(--muted); }
-.log { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); white-space: pre-wrap; max-height: 140px; overflow: auto; }
+.notice { color: #f5a623; font-weight: 600; }  /* warnings — must be noticed */
+.danger { color: #ff6b6b; font-weight: 600; }  /* errors */
+.log { font-family: ui-monospace, monospace; font-size: 13px; color: var(--ink); white-space: pre-wrap; max-height: 140px; overflow: auto; }
+.log.notice, .log.danger { font-family: inherit; }
 a.dl { color: var(--accent); }

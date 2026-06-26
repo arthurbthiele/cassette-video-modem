@@ -218,7 +218,7 @@ function encodeView() {
       setInputFile(fileIn, file);
       await applyVideoFile(file);
       await runEncode(); // one click: load + encode + show the result
-    } catch (e) { log.textContent = "Couldn't load sample: " + (e as Error).message; }
+    } catch (e) { log.textContent = "Couldn't load sample: " + (e as Error).message; log.className = "log danger"; }
   };
   const codecSel = el("select") as HTMLSelectElement;
   for (const label of Object.keys(CODECS)) codecSel.append(el("option", { value: label, textContent: label, selected: video.codec === CODECS[label] }));
@@ -240,6 +240,7 @@ function encodeView() {
     if (!enc) return;
     audioEl.src = enc.url; audioEl.style.display = "";
     log.textContent = enc.summary;
+    log.className = enc.summary.includes("⚠") ? "log notice" : "log";
     result.append(
       el("a", { className: "dl", href: enc.url, download: "cassette.wav", textContent: "⬇ Download WAV" }),
     );
@@ -255,11 +256,12 @@ function encodeView() {
   };
 
   const runEncode = async () => {
-    if (!E.sourceFile) { log.textContent = "Choose a video file first."; return; }
-    if (video.width < 96 || video.height < 64) { log.textContent = "Picture too small to decode reliably — needs at least 96×64. Pick a less extreme aspect ratio or a roomier profile."; return; }
+    if (!E.sourceFile) { log.textContent = "Choose a video file first (or try a sample)."; log.className = "log notice"; return; }
+    if (video.width < 96 || video.height < 64) { log.textContent = "Picture too small — the video codec needs at least 96×64 pixels. Pick a roomier profile, or a less extreme crop."; log.className = "log notice"; return; }
     encodeBtn.disabled = true;
     result.innerHTML = "";
     audioEl.style.display = "none";
+    log.className = "log";
     try {
       log.textContent = "Reading video frames…";
       const { wav, fit, audioSecs, videoSecs } = await encodeFileToWav(E.sourceFile, s, video, !E.colour, (f) => (log.textContent = `Reading frames… ${(f * 100) | 0}%`));
@@ -274,7 +276,8 @@ function encodeView() {
       state.decode.profileIdx = E.profileIdx; state.decode.settings = { ...s }; state.decode.sourceMode = "file";
       showResult();
     } catch (e) {
-      log.textContent = "Error: " + (e as Error).message;
+      log.textContent = (e as Error).message;
+      log.className = "log danger";
     } finally {
       encodeBtn.disabled = false;
     }
@@ -329,7 +332,7 @@ function decodeView() {
   const setReference = (src: string) => { refVideo.src = src; refVideo.currentTime = 0; originalCell.style.display = ""; };
   const clearReference = () => { refVideo.removeAttribute("src"); refVideo.load(); originalCell.style.display = "none"; };
   const stats = el("div", { className: "mono muted", textContent: "Load an audio file (or pick a device)." });
-  const warn = el("div", { className: "muted" });
+  const warn = el("div", { className: "danger" }); // only populated on real problems → make it stand out
 
   // ── decode pipeline (rebuilt on load / seek / settings change) ──
   let ds: DecoderState | null = null;
@@ -472,10 +475,10 @@ function decodeView() {
     }
     meters.draw(metersCanvas, blocks > 0);
     if (!preparing) {
-      if (blocks > 0) stats.textContent = `Decoding — ${blocks} chunk${blocks === 1 ? "" : "s"} recovered.`;
-      else if (sourceMode === "file" && samples && fed > 2 * fileRate) stats.textContent = "No picture yet — if this is your own recording, make sure the Profile matches the one used to encode it (or Load its .cassette config).";
-      else if (liveOn) stats.textContent = "Listening for a signal…";
-      else if (sourceMode === "file" && samples) stats.textContent = "Ready — press ▶ Play.";
+      if (blocks > 0) { stats.textContent = `Decoding — ${blocks} chunk${blocks === 1 ? "" : "s"} recovered.`; stats.className = "mono muted"; }
+      else if (sourceMode === "file" && samples && fed > 2 * fileRate) { stats.textContent = "No picture decoded — if this is your own recording, the Profile must match the one it was encoded with (or Load its .cassette config)."; stats.className = "mono notice"; }
+      else if (liveOn) { stats.textContent = "Listening for a signal…"; stats.className = "mono muted"; }
+      else if (sourceMode === "file" && samples) { stats.textContent = "Ready — press ▶ Play."; stats.className = "mono muted"; }
     }
     decodeRaf = requestAnimationFrame(loop);
   }
