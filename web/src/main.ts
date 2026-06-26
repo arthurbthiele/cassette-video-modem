@@ -141,6 +141,9 @@ function render() {
     t.onclick = () => { state.tab = m; render(); };
     tabs.append(t);
   }
+  const toolLink = el("a", { className: "tab", href: `${import.meta.env.BASE_URL}characterize.html`, textContent: "🔧 Tape test tool ↗", title: "Measure a cassette deck: frequency response, wow/flutter, AGC and which settings survive." }) as HTMLAnchorElement;
+  toolLink.style.cssText = "margin-left:auto;text-decoration:none";
+  tabs.append(toolLink);
   app.append(tabs);
   (state.tab === "encode" ? encodeView : decodeView)();
 }

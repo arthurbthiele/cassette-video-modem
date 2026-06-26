@@ -175,7 +175,11 @@ const analysePanel = el("section", { className: "panel" }, [
 
 // --- Page -----------------------------------------------------------------
 
+const backLink = el("a", { href: `${import.meta.env.BASE_URL}`, textContent: "← Cassette Video Modem", className: "muted" }) as HTMLAnchorElement;
+backLink.style.cssText = "display:inline-block;margin-bottom:8px;text-decoration:none";
+
 app.append(
+  backLink,
   el("h1", { textContent: "Tape Characterisation" }),
   el("p", { className: "sub" }, [
     "Record this test tone to your cassette, play it back, and capture the playback to a WAV. " +
