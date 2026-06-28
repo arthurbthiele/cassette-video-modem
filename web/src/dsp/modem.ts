@@ -12,7 +12,7 @@ import { butter, lfilter, applyPreEmphasis, applyDeEmphasis, addConstantPowerCar
 const fskP = (s: ModemSettings) => ({ sampleRate: s.sampleRate, baud: s.fskBaud, f0: s.fskF0, f1: s.fskF1 });
 const fsk4P = (s: ModemSettings) => ({ sampleRate: s.sampleRate, baud: s.fsk4Baud, freqs: [s.fsk4F0, s.fsk4F1, s.fsk4F2, s.fsk4F3] as [number, number, number, number] });
 const dpskP = (s: ModemSettings) => ({ sampleRate: s.sampleRate, baud: s.dpskBaud, carrier: s.dpskCarrier, phases: s.dpskPhases });
-const ofdmP = (s: ModemSettings) => ({ sampleRate: s.sampleRate, fftSize: s.ofdmFftSize, cpSize: s.ofdmCpSize, fMin: s.ofdmFMin, fMax: s.ofdmFMax, pilotInterval: s.ofdmPilotInterval, phases: s.ofdmPhases });
+const ofdmP = (s: ModemSettings) => ({ sampleRate: s.sampleRate, fftSize: s.ofdmFftSize, cpSize: s.ofdmCpSize, fMin: s.ofdmFMin, fMax: s.ofdmFMax, pilotInterval: s.ofdmPilotInterval, phases: s.ofdmPhases, freqDiff: s.ofdmFreqDiff });
 
 export function modulate(data: Uint8Array, s: ModemSettings): Float64Array {
   let audio: Float64Array;

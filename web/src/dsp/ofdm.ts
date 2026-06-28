@@ -15,6 +15,37 @@ export interface OfdmParams {
   pilotInterval: number;
   phases: number;
   trackTiming?: boolean; // continuous timing recovery (tape speed offset); off = legacy fixed-step decode
+  freqDiff?: boolean;    // differential across frequency (adjacent carriers) instead of across time
+}
+
+// Ordered carrier plan: every carrier kLo..kHi in frequency order, flagged pilot or
+// data. Needed by the frequency-differential path, which walks carriers contiguously.
+export function ofdmCarrierPlan(p: OfdmParams): { k: number; pilot: boolean }[] {
+  const res = p.sampleRate / p.fftSize;
+  const kLo = Math.max(1, Math.ceil(p.fMin / res));
+  const kHi = Math.min(p.fftSize / 2 - 1, Math.floor(p.fMax / res));
+  const plan: { k: number; pilot: boolean }[] = [];
+  for (let k = kLo; k <= kHi; k++) plan.push({ k, pilot: (k - kLo) % p.pilotInterval === 0 });
+  return plan;
+}
+
+const wrapPi = (x: number) => { let y = ((x % TWO_PI) + TWO_PI) % TWO_PI; if (y > Math.PI) y -= TWO_PI; return y; };
+
+// Estimate the per-carrier-step phase ramp b (= 2π·timingOffset/N) from the pilots'
+// absolute phases this symbol, robust to wrapping (unwrap along k, least-squares slope).
+function pilotRamp(re: Float64Array, im: Float64Array, pilots: number[]): number {
+  if (pilots.length < 2) return 0;
+  let acc = Math.atan2(im[pilots[0]], re[pilots[0]]);
+  let prev = acc, sk = 0, sy = 0, skk = 0, sky = 0, n = 0;
+  for (let i = 0; i < pilots.length; i++) {
+    const k = pilots[i];
+    const cur = Math.atan2(im[k], re[k]);
+    if (i > 0) { acc += wrapPi(cur - prev); }
+    prev = cur;
+    sk += k; sy += acc; skk += k * k; sky += k * acc; n++;
+  }
+  const denom = n * skk - sk * sk;
+  return Math.abs(denom) > 1e-9 ? (n * sky - sk * sy) / denom : 0;
 }
 
 export function ofdmCarriers(p: OfdmParams): { data: number[]; pilots: number[] } {
@@ -42,26 +73,47 @@ export function modulateOfdm(data: Uint8Array, p: OfdmParams): Float64Array {
   const nSyms = Math.max(1, Math.ceil(bits.length / bposs));
   while (bits.length < nSyms * bposs) bits.push(0);
 
+  const plan = p.freqDiff ? ofdmCarrierPlan(p) : [];
   const cPhase = new Float64Array(N / 2 + 1);
   const out = new Float64Array(nSyms * (N + CP));
   let outIdx = 0;
   for (let symI = 0; symI < nSyms; symI++) {
     const re = new Float64Array(N);
     const im = new Float64Array(N);
+    const phase = new Float64Array(N / 2 + 1);
     const setCarrier = (k: number) => {
-      re[k] = Math.cos(cPhase[k]);
-      im[k] = Math.sin(cPhase[k]);
+      re[k] = Math.cos(phase[k]);
+      im[k] = Math.sin(phase[k]);
       re[N - k] = re[k];
       im[N - k] = -im[k]; // conjugate symmetry → real time signal
     };
-    for (const k of pilots) setCarrier(k); // pilots stay at phase 0 (constant reference)
     const base = symI * bposs;
-    dc.forEach((k, ci) => {
-      let val = 0;
-      for (let b = 0; b < bps; b++) val = (val << 1) | bits[base + ci * bps + b];
-      cPhase[k] = mod2pi(cPhase[k] + enc[val] * step);
-      setCarrier(k);
-    });
+    if (p.freqDiff) {
+      // Differential across frequency: walk carriers in order; each data carrier's
+      // phase steps from its neighbour by enc[val]; pilots reset the chain to 0.
+      let running = 0, ci = 0;
+      for (const { k, pilot } of plan) {
+        if (pilot) { phase[k] = 0; running = 0; }
+        else {
+          let val = 0;
+          for (let b = 0; b < bps; b++) val = (val << 1) | bits[base + ci * bps + b];
+          phase[k] = mod2pi(running + enc[val] * step);
+          running = phase[k];
+          ci++;
+        }
+        setCarrier(k);
+      }
+    } else {
+      // Differential across time: phase accumulates per carrier across symbols.
+      for (const k of pilots) { phase[k] = cPhase[k]; setCarrier(k); } // pilots stay at 0
+      dc.forEach((k, ci) => {
+        let val = 0;
+        for (let b = 0; b < bps; b++) val = (val << 1) | bits[base + ci * bps + b];
+        cPhase[k] = mod2pi(cPhase[k] + enc[val] * step);
+        phase[k] = cPhase[k];
+        setCarrier(k);
+      });
+    }
     fftInPlace(re, im, true); // ifft → re holds the real time-domain symbol
     let mx = 0;
     for (let k = 0; k < N; k++) mx = Math.max(mx, Math.abs(re[k]));
@@ -92,7 +144,10 @@ export class OfdmStreamDemod {
   private ipF = 0;
   private rateEst = 1;
   private trackInit = false;
+  private lockRate = 1; // rate estimate found at acquisition (seeds the tracker)
   private track: boolean;
+  private freqDiff: boolean;
+  private plan: { k: number; pilot: boolean }[];
 
   constructor(p: OfdmParams) {
     this.N = p.fftSize; this.CP = p.cpSize; this.SL = this.N + this.CP;
@@ -102,6 +157,8 @@ export class OfdmStreamDemod {
     const c = ofdmCarriers(p); this.dc = c.data; this.pilots = c.pilots;
     this.prev = new Float64Array(this.N / 2 + 1);
     this.track = !!p.trackTiming;
+    this.freqDiff = !!p.freqDiff;
+    this.plan = ofdmCarrierPlan(p);
   }
 
   // high-pass below the OFDM band — used only for the lock decision, to strip the
@@ -113,9 +170,46 @@ export class OfdmStreamDemod {
     return lfilter(b, a, buf).y;
   }
 
+  // Acquisition: legacy fixed-rate lock for the bit-exact path; rate-aware lock when
+  // timing recovery is on (a tape's speed offset misaligns the fixed-stride average,
+  // which would otherwise fail to lock at unlucky rates).
+  private tryLock(): boolean {
+    return this.track ? this.tryLockRate() : this.tryLockFixed();
+  }
+
+  // Rate-aware lock: coarse-search the symbol length (= N·rate + CP) AND the offset,
+  // correlating the CP with its tail at the matching lag. Seeds rateEst from the
+  // winning rate so the fine tracker starts already close.
+  private tryLockRate(): boolean {
+    const N = this.N, CP = this.CP, SL = this.SL;
+    if (this.buf.length < 4 * SL) return false;
+    const hp = this.hpForLock(this.buf);
+    let best = -1, bestD = 0, bestL = N, sum = 0, cnt = 0;
+    for (let L = Math.round(N * 0.95); L <= Math.round(N * 1.05); L += 2) {
+      const SLc = L + CP;
+      const nsym = Math.min(6, Math.floor((hp.length - L - CP) / SLc));
+      if (nsym < 3) continue;
+      for (let d = 0; d < SLc; d += 2) {
+        let num = 0, den = 0;
+        for (let s = 0; s < nsym; s++) {
+          const base = d + s * SLc;
+          let ab = 0, aa = 0, bb = 0;
+          for (let m = 0; m < CP; m++) { const x = hp[base + m], y = hp[base + L + m]; ab += x * y; aa += x * x; bb += y * y; }
+          num += Math.abs(ab); den += 0.5 * (aa + bb);
+        }
+        const sc = num / (den + 1e-12);
+        sum += sc; cnt++;
+        if (sc > best) { best = sc; bestD = d; bestL = L; }
+      }
+    }
+    const mean = sum / Math.max(1, cnt);
+    if (best >= 0.45 && best >= 1.5 * mean) { this.pos = bestD; this.lockRate = bestL / N; this.locked = true; return true; }
+    return false;
+  }
+
   // initial lock: peak CP-correlation offset over the first few symbols, gated
   // on peakiness so the preamble tone / AGC carrier can't trigger a false lock
-  private tryLock(): boolean {
+  private tryLockFixed(): boolean {
     const SL = this.SL, N = this.N, CP = this.CP;
     if (this.buf.length < 3 * SL) return false;
     const nsym = Math.floor((this.buf.length - N - CP) / SL);
@@ -174,6 +268,19 @@ export class OfdmStreamDemod {
     const re = new Float64Array(N); const im = new Float64Array(N);
     for (let k = 0; k < N; k++) re[k] = this.interp(ip + (this.CP + k) * rate); // resample the data part to nominal rate
     fftInPlace(re, im, false);
+    if (this.freqDiff) {
+      // Differential across frequency: each data carrier is decoded against its
+      // neighbour within THIS symbol, so inter-symbol wow can't accumulate. The
+      // pilots give the per-step ramp b (= timing offset) to subtract.
+      const b = pilotRamp(re, im, this.pilots);
+      for (const { k, pilot } of this.plan) {
+        if (pilot) continue;
+        const d = wrapPi(Math.atan2(im[k], re[k]) - Math.atan2(im[k - 1], re[k - 1]) - b);
+        const sym = this.dec[((Math.round(d / this.step) % this.dec.length) + this.dec.length) % this.dec.length];
+        for (let j = this.bps - 1; j >= 0; j--) out.push((sym >> j) & 1);
+      }
+      return b; // ramp doubles as the timing-drift signal for the tracker
+    }
     // Least-squares fit of the differential pilot phases to a line a + b·k:
     // a = common phase error, b = inter-symbol timing drift (the wow term).
     let n = 0, sk = 0, sd = 0, skk = 0, skd = 0;
@@ -219,7 +326,7 @@ export class OfdmStreamDemod {
       if (keepL > SL) { this.buf = this.buf.slice(keepL); this.pos -= keepL; }
       return out;
     }
-    if (!this.trackInit) { this.ipF = this.pos; this.rateEst = 1; this.trackInit = true; }
+    if (!this.trackInit) { this.ipF = this.pos; this.rateEst = this.lockRate; this.trackInit = true; }
     // Per symbol: read the local rate off the cyclic prefix (lag search + parabolic
     // sub-sample peak), smooth it into rateEst (tracks constant offset + slow wow),
     // re-centre the symbol start, then decode the symbol resampled to nominal rate.

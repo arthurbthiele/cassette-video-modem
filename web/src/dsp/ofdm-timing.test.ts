@@ -55,10 +55,40 @@ describe("OFDM continuous timing tracker", () => {
     expect(scen["+1%"]).toBeGreaterThanOrEqual(Math.floor(EXPECTED * 0.9));
     expect(scen["-1%"]).toBeGreaterThanOrEqual(Math.floor(EXPECTED * 0.6));
     expect(scen["+2%"]).toBeGreaterThanOrEqual(Math.floor(EXPECTED * 0.6));
-    // NOTE: fast wow/flutter (varying rate) is NOT yet recovered — the tracker
-    // follows it but residual per-symbol error still fails RS. Logged above as a
-    // known limitation; the next step (finer resampler / coherent pilot equaliser)
-    // targets it. Asserted only that it doesn't crash.
+    // NOTE: time-differential fails fast wow/flutter — the freq-differential test
+    // below is the fix being developed for it.
     expect(scen["wow0.5%"]).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// Frequency-differential modulation: data rides on the phase step between adjacent
+// carriers within one symbol, so inter-symbol wow can't accumulate. This is the
+// candidate fix for the wandering-rate (wow/flutter) case.
+describe("OFDM frequency-differential (wow-robust)", () => {
+  const fs: ModemSettings = { ...s, ofdmFreqDiff: true, ofdmTrackTiming: true };
+  const FAUDIO = Float32Array.from(encodeStream(DATA, fs));
+  const fblocks = (samples: Float32Array): number => {
+    const ds = new DecoderState(fs);
+    let n = 0;
+    for (let i = 0; i < samples.length; i += 4096)
+      for (const b of ds.feedAudio(samples.subarray(i, i + 4096))) if (b.seq !== METADATA_SEQ) n++;
+    return n;
+  };
+  it("recovery profile (freq-diff) across wow + offset", () => {
+    const wow = (o: object) => simulateChannel(FAUDIO, { sampleRate: s.sampleRate, ...o });
+    const scen: Record<string, number> = {
+      clean: fblocks(FAUDIO),
+      "+1% offset": fblocks(resample(FAUDIO, 1.01)),
+      "wow0.5%@1.2": fblocks(wow({ wowDepth: 0.005, wowRateHz: 1.2, flutterDepth: 0.002, flutterRateHz: 8, snrDb: 45 })),
+      "wow1.2%@1.2": fblocks(wow({ wowDepth: 0.012, wowRateHz: 1.2, flutterDepth: 0.003, flutterRateHz: 9, snrDb: 35 })),
+      "wow1%+band+noise": fblocks(wow({ wowDepth: 0.01, wowRateHz: 1.5, flutterDepth: 0.004, flutterRateHz: 9, bandLowHz: 300, bandHighHz: 6500, snrDb: 28 })),
+    };
+    // eslint-disable-next-line no-console
+    console.log(`FREQ-DIFF EXPECTED ${EXPECTED} →`, JSON.stringify(scen, null, 0));
+    expect(scen.clean).toBeGreaterThanOrEqual(EXPECTED - 2);
+    expect(scen["+1% offset"]).toBeGreaterThanOrEqual(Math.floor(EXPECTED * 0.8));
+    // the win: wow that completely defeats time-differential now recovers
+    expect(scen["wow0.5%@1.2"]).toBeGreaterThanOrEqual(Math.floor(EXPECTED * 0.7));
+    expect(scen["wow1%+band+noise"]).toBeGreaterThanOrEqual(Math.floor(EXPECTED * 0.6));
   });
 });

@@ -8,7 +8,7 @@ import { el } from "./dom";
 type Num = "sampleRate" | "fskBaud" | "fskF0" | "fskF1" | "fsk4Baud" | "fsk4F0" | "fsk4F1" | "fsk4F2" | "fsk4F3" |
   "dpskBaud" | "dpskCarrier" | "dpskPhases" | "ofdmFftSize" | "ofdmCpSize" | "ofdmFMin" | "ofdmFMax" |
   "ofdmPilotInterval" | "ofdmPhases" | "constantPowerCarrierHz" | "rsNsym" | "blockDataSize";
-type Bool = "constantPower" | "preEmphasis" | "reedSolomon" | "ofdmTrackTiming";
+type Bool = "constantPower" | "preEmphasis" | "reedSolomon" | "ofdmTrackTiming" | "ofdmFreqDiff";
 
 export function settingsPanel(s: ModemSettings, onChange: () => void, opts: { hideSampleRate?: boolean } = {}): HTMLElement {
   const root = el("div");
@@ -57,7 +57,8 @@ export function settingsPanel(s: ModemSettings, onChange: () => void, opts: { hi
         num("Pilot interval", "ofdmPilotInterval", 1, "Every Nth subcarrier is a known pilot, used to track phase and timing."),
       );
       root.append(phasesRow("Phases per carrier", s, "ofdmPhases", onChange));
-      root.append(check("Track tape speed (decode)", "ofdmTrackTiming", "Decoder-only: continuously re-locks symbol timing so a tape playing slightly fast or slow still decodes. Recovers a constant speed offset; heavy wow/flutter still defeats it. Leave off for clean digital files."));
+      root.append(check("Track tape speed (decode)", "ofdmTrackTiming", "Decoder-only: continuously re-locks symbol timing so a tape playing slightly fast or slow still decodes. Recovers a constant speed offset. Leave off for clean digital files."));
+      root.append(check("Wow-robust mode (tape)", "ofdmFreqDiff", "Encodes data across adjacent carriers within each symbol instead of across symbols, so tape wow/flutter (speed wobble) can't scramble it. MUST match on encoder and decoder (save a .cassette). For tape, turn this AND 'Track tape speed' on. Off for clean digital files."));
     }
 
     root.append(el("hr", { style: "border-color:#2c3038" }));
