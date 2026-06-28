@@ -46,6 +46,15 @@ export const PROFILES: DeviceProfile[] = [
     settings: { method: "dpsk", dpskBaud: 1800, dpskCarrier: 2600, dpskPhases: 4, constantPower: false, reedSolomon: true, rsNsym: 24 },
     video: { width: 96, height: 64, fps: 4 },
   },
+  {
+    // The real-cassette profile: frequency-differential + timing recovery survive a
+    // deck's speed wobble (wow/flutter), which defeats the plain profiles. Encode AND
+    // decode must use this same profile (the wire format differs).
+    name: "Cassette — wow-robust",
+    description: "For recording to and from a real cassette deck — survives tape speed wobble (wow/flutter). Use this SAME profile to encode and to decode.",
+    settings: { method: "ofdm", ofdmFMin: 500, ofdmFMax: 6000, ofdmPhases: 2, ofdmPilotInterval: 8, reedSolomon: true, rsNsym: 24, constantPower: false, ofdmTrackTiming: true, ofdmFreqDiff: true },
+    video: { width: 96, height: 72, fps: 6 },
+  },
 ];
 
 export function applyProfile(base: ModemSettings, p: DeviceProfile): ModemSettings {

@@ -17,6 +17,7 @@ import { framesFromFile } from "./video/source";
 import { encodeToFitChannel } from "./video/encoder";
 import { StreamVideoDecoder } from "./video/decoder";
 import { ContainerParser } from "./video/container";
+import { simulateChannel, ChannelOptions } from "./dsp/channel";
 import { encodeWav, decodeWav } from "./audio/wav";
 import { Capture, listInputDevices } from "./audio/capture";
 import { PROFILES, applyProfile } from "./profiles";
@@ -123,6 +124,13 @@ function loadConfigButton(): HTMLElement {
   const btn = el("button", { className: "secondary", textContent: "Load config (.cassette)" });
   btn.onclick = () => input.click();
   return el("span", {}, [btn, input]);
+}
+
+// Wrap the (rarely-needed) raw modem settings in a collapsed disclosure so the
+// Profile is the primary control and the knobs aren't in a casual user's face.
+function advanced(...children: (HTMLElement | string)[]): HTMLElement {
+  const summary = el("summary", { textContent: "Advanced modem settings", style: "cursor:pointer;color:var(--muted);font-size:13px" });
+  return el("details", { className: "panel" }, [summary, ...children]);
 }
 
 function render() {
@@ -309,7 +317,7 @@ function encodeView() {
       num("Frame rate", video.fps, (v) => (video.fps = v), 1, "Frames per second. Lower = fewer bits and an easier fit."),
       num("Keyframe interval (seconds)", video.gopSeconds, (v) => (video.gopSeconds = v), 1, "Seconds between full keyframes. Longer compresses better, but a dropout costs more until the next keyframe."),
     ]),
-    el("div", { className: "panel" }, [el("p", { className: "muted", textContent: "Modem settings (must match the decoder — save a config to pair them)" }), panel]),
+    advanced(el("p", { className: "muted", style: "margin-top:8px", textContent: "Your profile already sets these — change only to experiment. Must match the decoder (save a .cassette to pair them)." }), panel),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [el("label", { textContent: "Capacity" }), budget]), el("div", { className: "row" }, [meter])]),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [encodeBtn]), result, audioEl, playbackRow, log]),
   );
@@ -363,7 +371,9 @@ function decodeView() {
   }
 
   // ── FILE: a self-paced transport drives real-time decoding of in-memory samples ──
-  let samples: Float32Array | null = null;
+  let samples: Float32Array | null = null;      // what we decode (possibly cassette-simulated)
+  let samplesRaw: Float32Array | null = null;   // the pristine loaded WAV
+  let simMode = "off";                           // "Simulate cassette" severity
   let fileRate = 44100;
   let playhead = 0;
   let fed = 0;
@@ -396,14 +406,37 @@ function decodeView() {
   };
   seek.oninput = () => { if (samples) reseek(Math.floor((parseInt(seek.value) / 1000) * samples.length)); };
 
+  // "Simulate cassette": run the loaded WAV through the deck channel model (wow,
+  // flutter, band-limit, noise, AGC) before decoding — an in-browser tape, so a fix
+  // can be A/B'd instantly (flip severity, or switch profile) with no physical deck.
+  const simPreset = (mode: string): ChannelOptions | null => {
+    const base = { sampleRate: fileRate, seed: 7 };
+    switch (mode) {
+      case "mild": return { ...base, wowDepth: 0.004, wowRateHz: 1.0, flutterDepth: 0.0015, flutterRateHz: 8, snrDb: 40, bandHighHz: 6500 };
+      case "realistic": return { ...base, wowDepth: 0.008, wowRateHz: 1.2, flutterDepth: 0.003, flutterRateHz: 9, bandLowHz: 300, bandHighHz: 6000, snrDb: 30, agc: true, agcTargetRms: 0.25 };
+      case "harsh": return { ...base, wowDepth: 0.015, wowRateHz: 1.4, flutterDepth: 0.005, flutterRateHz: 10, bandLowHz: 300, bandHighHz: 5500, snrDb: 24, agc: true, dropoutPerSec: 0.3 };
+      default: return null;
+    }
+  };
+  const applySim = () => {
+    if (!samplesRaw) return;
+    const opts = simPreset(simMode);
+    samples = opts ? simulateChannel(samplesRaw, opts) : samplesRaw;
+    reseek(0); playing = false; playBtn.textContent = "▶ Play";
+  };
+
   const fileIn = el("input", { type: "file", accept: "audio/wav,.wav" }) as HTMLInputElement;
   const loadWav = (buf: ArrayBuffer) => {
     warn.textContent = "";
     const dec = decodeWav(buf);
-    samples = dec.samples; fileRate = dec.sampleRate;
-    reseek(0); playing = false; playBtn.textContent = "▶ Play";
+    samplesRaw = dec.samples; fileRate = dec.sampleRate;
+    applySim();
     transport.style.display = ""; // status is shown by the loop ("Ready — press Play" / "Decoding…")
   };
+  const simSel = el("select") as HTMLSelectElement;
+  for (const [v, label] of [["off", "Off (decode the file as-is)"], ["mild", "Mild wobble"], ["realistic", "Realistic deck"], ["harsh", "Harsh / worn deck"]] as const)
+    simSel.append(el("option", { value: v, textContent: label, selected: v === simMode }));
+  simSel.onchange = () => { simMode = simSel.value; applySim(); };
   fileIn.onchange = async () => {
     const f = fileIn.files?.[0];
     if (!f) return;
@@ -584,9 +617,10 @@ function decodeView() {
       el("div", { className: "row" }, [el("label", { textContent: "Sample tape" }), sampleTapeSel, sampleTapeBtn]),
       el("div", { className: "row" }, [sampleTapeNote]),
       liveRow,
+      el("div", { className: "row" }, [el("label", { textContent: "Simulate cassette", title: "Play the loaded WAV through a simulated tape deck (wow, flutter, noise) before decoding — A/B a fix or demo robustness without a physical tape." }), simSel]),
       el("p", { className: "muted", textContent: "Decode a tape back to video. The Profile must match the one it was encoded with (or Load its .cassette config); then choose the WAV and press Play — it decodes in real time, and you can scrub to start anywhere." }),
-      panel,
     ]),
+    advanced(panel),
     el("div", { className: "panel" }, [el("div", { className: "row" }, [popBtn, refBtn, refIn]), stats, warn, el("p", { className: "muted", textContent: "Signal: green = locked on and decoding · amber = hearing something but not locked on · grey = silence" }), metersCanvas]),
     canvasHolder,
   );
