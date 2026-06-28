@@ -14,6 +14,7 @@ export interface OfdmParams {
   fMax: number;
   pilotInterval: number;
   phases: number;
+  trackTiming?: boolean; // continuous timing recovery (tape speed offset); off = legacy fixed-step decode
 }
 
 export function ofdmCarriers(p: OfdmParams): { data: number[]; pilots: number[] } {
@@ -87,6 +88,11 @@ export class OfdmStreamDemod {
   private pos = 0;
   private prev: Float64Array;
   locked = false;
+  // continuous timing recovery: fractional read cursor + tracked sample-rate ratio
+  private ipF = 0;
+  private rateEst = 1;
+  private trackInit = false;
+  private track: boolean;
 
   constructor(p: OfdmParams) {
     this.N = p.fftSize; this.CP = p.cpSize; this.SL = this.N + this.CP;
@@ -95,6 +101,7 @@ export class OfdmStreamDemod {
     this.fMin = p.fMin; this.sr = p.sampleRate;
     const c = ofdmCarriers(p); this.dc = c.data; this.pilots = c.pilots;
     this.prev = new Float64Array(this.N / 2 + 1);
+    this.track = !!p.trackTiming;
   }
 
   // high-pass below the OFDM band — used only for the lock decision, to strip the
@@ -137,10 +144,35 @@ export class OfdmStreamDemod {
     return false;
   }
 
-  private decodeSymbolAt(start: number, out: number[]): void {
+  // Linear interpolation into the sample buffer at a fractional index — the
+  // resampler's kernel. Lets us read a symbol back at *nominal* spacing from a
+  // tape that recorded it at a slightly different (and wandering) rate.
+  private interp(x: number): number {
+    if (x < 0) return 0;
+    const j = Math.floor(x);
+    if (j + 1 >= this.buf.length) return this.buf[this.buf.length - 1] ?? 0;
+    const f = x - j;
+    return this.buf[j] * (1 - f) + this.buf[j + 1] * f;
+  }
+
+  // Normalised correlation between a window at `s` and one at `s+lag` (both `win`
+  // long), read through the interpolator. The cyclic prefix is a copy of the
+  // symbol tail, so at the symbol start this peaks when `lag` equals the symbol's
+  // *received* N-length — which under tape speed error is N·rate, not N. That's
+  // how we read the rate straight off the signal, with no phase-wrap limit.
+  private cpCorrAt(s: number, lag: number, win: number): number {
+    let ab = 0, aa = 0, bb = 0;
+    for (let m = 0; m < win; m++) {
+      const x = this.interp(s + m), y = this.interp(s + lag + m);
+      ab += x * y; aa += x * x; bb += y * y;
+    }
+    return Math.abs(ab) / (Math.sqrt(aa * bb) + 1e-12);
+  }
+
+  private decodeResampledAt(ip: number, rate: number, out: number[]): number {
     const N = this.N;
     const re = new Float64Array(N); const im = new Float64Array(N);
-    for (let k = 0; k < N; k++) re[k] = this.buf[start + this.CP + k];
+    for (let k = 0; k < N; k++) re[k] = this.interp(ip + (this.CP + k) * rate); // resample the data part to nominal rate
     fftInPlace(re, im, false);
     // Least-squares fit of the differential pilot phases to a line a + b·k:
     // a = common phase error, b = inter-symbol timing drift (the wow term).
@@ -163,6 +195,7 @@ export class OfdmStreamDemod {
       for (let j = this.bps - 1; j >= 0; j--) out.push((sym >> j) & 1);
       this.prev[k] = curr - corr;
     }
+    return b; // residual inter-symbol timing slope → fine rate-tracking signal
   }
 
   push(audio: Float64Array): number[] {
@@ -174,13 +207,41 @@ export class OfdmStreamDemod {
     // tryLock rescans all of it every push → O(n²) → the page freezes/crashes.
     if (!this.locked && this.buf.length > 120 * this.SL) this.buf = this.buf.slice(this.buf.length - 80 * this.SL);
     if (!this.locked && !this.tryLock()) return out;
-    const SL = this.SL;
-    while (this.pos + SL + 1 <= this.buf.length && this.pos >= 0) {
-      this.decodeSymbolAt(this.pos, out);
-      this.pos += SL;
+    const SL = this.SL, N = this.N, CP = this.CP, W = 10;
+    if (!this.track) {
+      // Legacy fixed-step decode (bit-exact, validated against Python). Decoding at
+      // rate 1 / integer positions makes decodeResampledAt identical to the original.
+      while (this.pos + SL + 1 <= this.buf.length && this.pos >= 0) {
+        this.decodeResampledAt(this.pos, 1, out);
+        this.pos += SL;
+      }
+      const keepL = this.pos - 2 * SL;
+      if (keepL > SL) { this.buf = this.buf.slice(keepL); this.pos -= keepL; }
+      return out;
     }
-    const keep = this.pos - 2 * SL; // retain a little history behind the cursor
-    if (keep > SL) { this.buf = this.buf.slice(keep); this.pos -= keep; }
+    if (!this.trackInit) { this.ipF = this.pos; this.rateEst = 1; this.trackInit = true; }
+    // Per symbol: read the local rate off the cyclic prefix (lag search + parabolic
+    // sub-sample peak), smooth it into rateEst (tracks constant offset + slow wow),
+    // re-centre the symbol start, then decode the symbol resampled to nominal rate.
+    while (this.ipF >= W && this.ipF + (N + CP) * this.rateEst + N * 0.05 + 2 <= this.buf.length) {
+      const win = Math.max(16, Math.round(CP * this.rateEst));
+      const lo = Math.round(N * this.rateEst * 0.96), hi = Math.round(N * this.rateEst * 1.04);
+      let bestL = Math.round(N * this.rateEst), bestC = -1;
+      for (let L = lo; L <= hi; L++) { const c = this.cpCorrAt(this.ipF, L, win); if (c > bestC) { bestC = c; bestL = L; } }
+      const cm = this.cpCorrAt(this.ipF, bestL - 1, win), cpc = this.cpCorrAt(this.ipF, bestL + 1, win);
+      const den = cm - 2 * bestC + cpc;
+      const sub = Math.abs(den) > 1e-9 ? Math.max(-0.5, Math.min(0.5, 0.5 * (cm - cpc) / den)) : 0;
+      this.rateEst = Math.min(1.05, Math.max(0.95, this.rateEst + 0.5 * ((bestL + sub) / N - this.rateEst)));
+      const lag = Math.round(N * this.rateEst);
+      let bestD = 0, bd = -1;
+      for (let d = -W; d <= W; d++) { const c = this.cpCorrAt(this.ipF + d, lag, win); if (c > bd) { bd = c; bestD = d; } }
+      this.ipF += bestD;
+      this.decodeResampledAt(this.ipF, this.rateEst, out);
+      this.ipF += (N + CP) * this.rateEst;
+      this.pos = Math.floor(this.ipF);
+    }
+    const keep = Math.floor(this.ipF) - 2 * SL - 16; // retain history behind the cursor for the search windows
+    if (keep > SL) { this.buf = this.buf.slice(keep); this.ipF -= keep; this.pos -= keep; }
     return out;
   }
 }

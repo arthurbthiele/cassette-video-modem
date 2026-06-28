@@ -149,5 +149,5 @@ function concat(a: Float64Array, b: Float64Array): Float64Array {
   return out;
 }
 function ofdmParams(s: ModemSettings) {
-  return { sampleRate: s.sampleRate, fftSize: s.ofdmFftSize, cpSize: s.ofdmCpSize, fMin: s.ofdmFMin, fMax: s.ofdmFMax, pilotInterval: s.ofdmPilotInterval, phases: s.ofdmPhases };
+  return { sampleRate: s.sampleRate, fftSize: s.ofdmFftSize, cpSize: s.ofdmCpSize, fMin: s.ofdmFMin, fMax: s.ofdmFMax, pilotInterval: s.ofdmPilotInterval, phases: s.ofdmPhases, trackTiming: s.ofdmTrackTiming };
 }
