@@ -145,6 +145,7 @@ export class OfdmStreamDemod {
   private rateEst = 1;
   private trackInit = false;
   private lockRate = 1; // rate estimate found at acquisition (seeds the tracker)
+  private lowRun = 0;   // consecutive low-correlation symbols → declare lock lost, re-acquire
   private track: boolean;
   private freqDiff: boolean;
   private plan: { k: number; pilot: boolean }[];
@@ -326,29 +327,49 @@ export class OfdmStreamDemod {
       if (keepL > SL) { this.buf = this.buf.slice(keepL); this.pos -= keepL; }
       return out;
     }
-    if (!this.trackInit) { this.ipF = this.pos; this.rateEst = this.lockRate; this.trackInit = true; }
     // Per symbol: read the local rate off the cyclic prefix (lag search + parabolic
     // sub-sample peak), smooth it into rateEst (tracks constant offset + slow wow),
     // re-centre the symbol start, then decode the symbol resampled to nominal rate.
-    while (this.ipF >= W && this.ipF + (N + CP) * this.rateEst + N * 0.05 + 2 <= this.buf.length) {
-      const win = Math.max(16, Math.round(CP * this.rateEst));
-      const lo = Math.round(N * this.rateEst * 0.96), hi = Math.round(N * this.rateEst * 1.04);
-      let bestL = Math.round(N * this.rateEst), bestC = -1;
-      for (let L = lo; L <= hi; L++) { const c = this.cpCorrAt(this.ipF, L, win); if (c > bestC) { bestC = c; bestL = L; } }
-      const cm = this.cpCorrAt(this.ipF, bestL - 1, win), cpc = this.cpCorrAt(this.ipF, bestL + 1, win);
-      const den = cm - 2 * bestC + cpc;
-      const sub = Math.abs(den) > 1e-9 ? Math.max(-0.5, Math.min(0.5, 0.5 * (cm - cpc) / den)) : 0;
-      this.rateEst = Math.min(1.05, Math.max(0.95, this.rateEst + 0.5 * ((bestL + sub) / N - this.rateEst)));
-      const lag = Math.round(N * this.rateEst);
-      let bestD = 0, bd = -1;
-      for (let d = -W; d <= W; d++) { const c = this.cpCorrAt(this.ipF + d, lag, win); if (c > bd) { bd = c; bestD = d; } }
-      this.ipF += bestD;
-      this.decodeResampledAt(this.ipF, this.rateEst, out);
-      this.ipF += (N + CP) * this.rateEst;
-      this.pos = Math.floor(this.ipF);
+    // If the cyclic-prefix correlation stays low for a stretch, the lock is gone
+    // (a bad wow excursion / dropout) — skip past it and re-acquire, so one bad
+    // patch degrades to a gap instead of killing the rest of the stream.
+    let guard = 0;
+    while (guard++ < 64) {
+      if (!this.locked && !this.tryLock()) break;
+      // Start the cursor past the ±W start-search margin (a lock offset below W
+      // would otherwise make the inner loop's `ipF >= W` guard skip every symbol).
+      if (!this.trackInit) { this.ipF = this.pos < W ? this.pos + SL : this.pos; this.rateEst = this.lockRate; this.trackInit = true; }
+      let lost = false;
+      while (this.ipF >= W && this.ipF + (N + CP) * this.rateEst + N * 0.05 + 2 <= this.buf.length) {
+        const win = Math.max(16, Math.round(CP * this.rateEst));
+        const lo = Math.round(N * this.rateEst * 0.96), hi = Math.round(N * this.rateEst * 1.04);
+        let bestL = Math.round(N * this.rateEst), bestC = -1;
+        for (let L = lo; L <= hi; L++) { const c = this.cpCorrAt(this.ipF, L, win); if (c > bestC) { bestC = c; bestL = L; } }
+        const cm = this.cpCorrAt(this.ipF, bestL - 1, win), cpc = this.cpCorrAt(this.ipF, bestL + 1, win);
+        const den = cm - 2 * bestC + cpc;
+        const sub = Math.abs(den) > 1e-9 ? Math.max(-0.5, Math.min(0.5, 0.5 * (cm - cpc) / den)) : 0;
+        this.rateEst = Math.min(1.05, Math.max(0.95, this.rateEst + 0.5 * ((bestL + sub) / N - this.rateEst)));
+        const lag = Math.round(N * this.rateEst);
+        let bestD = 0, bd = -1;
+        for (let d = -W; d <= W; d++) { const c = this.cpCorrAt(this.ipF + d, lag, win); if (c > bd) { bd = c; bestD = d; } }
+        this.ipF += bestD;
+        this.decodeResampledAt(this.ipF, this.rateEst, out);
+        this.ipF += (N + CP) * this.rateEst;
+        this.pos = Math.floor(this.ipF);
+        this.lowRun = bd < 0.3 ? this.lowRun + 1 : 0;
+        if (this.lowRun >= 12) {
+          const cut = Math.min(this.buf.length, Math.floor(this.ipF) + SL); // skip the lost patch
+          this.buf = this.buf.slice(cut); this.ipF = 0; this.pos = 0;
+          this.locked = false; this.trackInit = false; this.lowRun = 0;
+          lost = true; break;
+        }
+      }
+      if (!lost) break; // ran out of buffer (normal) — wait for more audio
     }
-    const keep = Math.floor(this.ipF) - 2 * SL - 16; // retain history behind the cursor for the search windows
-    if (keep > SL) { this.buf = this.buf.slice(keep); this.ipF -= keep; this.pos -= keep; }
+    if (this.locked) {
+      const keep = Math.floor(this.ipF) - 2 * SL - 16; // retain history behind the cursor for the search windows
+      if (keep > SL) { this.buf = this.buf.slice(keep); this.ipF -= keep; this.pos -= keep; }
+    }
     return out;
   }
 }
